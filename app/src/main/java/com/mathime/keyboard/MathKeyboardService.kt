@@ -5,6 +5,8 @@ import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.view.MotionEvent
+import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.os.Build
 import android.widget.Button
@@ -23,6 +25,16 @@ class MathKeyboardService : InputMethodService() {
     private lateinit var formula: EditText
     private lateinit var status: TextView
     private val pending = Runnable { recognize() }
+    private var deleteRepeating = false
+    private var deleteTriggeredByHold = false
+    private val deleteRepeat = object : Runnable {
+        override fun run() {
+            if (!deleteRepeating) return
+            deleteCharacter()
+            handler.postDelayed(this, 75L)
+        }
+    }
+
 
     override fun onCreateInputView(): View {
         val density = resources.displayMetrics.density
@@ -62,13 +74,39 @@ class MathKeyboardService : InputMethodService() {
                     setAllCaps(false)
                     setOnClickListener { action(label) }
                 }
+                if (label == "⌫") {
+                    // Tap: one character. Hold: start repeating after 450 ms.
+                    button.setOnTouchListener { _, event ->
+                        when (event.actionMasked) {
+                            MotionEvent.ACTION_DOWN -> {
+                                deleteTriggeredByHold = false
+                                deleteRepeating = false
+                                handler.removeCallbacks(deleteRepeat)
+                                handler.postDelayed({
+                                    if (button.isPressed) {
+                                        deleteTriggeredByHold = true
+                                        deleteRepeating = true
+                                        deleteRepeat.run()
+                                    }
+                                }, 450L)
+                                false
+                            }
+                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                deleteRepeating = false
+                                handler.removeCallbacks(deleteRepeat)
+                                false
+                            }
+                            else -> false
+                        }
+                    }
+                }
                 line.addView(button, LinearLayout.LayoutParams(0, (density * 46).toInt(), 1f))
             }
             root.addView(line)
         }
         row("∫", "∂", "∞", "Σ", "√", "π") { addSymbol(it) }
         row("^", "_", "\\frac{}{}", "\\lim_{}", "dx", "=") { addSymbol(it) }
-        row("辨識", "復原", "清除", "手動", "輸入", "🌐") { label ->
+        row("辨識", "復原", "清除", "手動", "輸入", "⌫") { label ->
             when (label) {
                 "辨識" -> recognize()
                 "復原" -> { handler.removeCallbacks(pending); ink.undo(); status.text = "已復原上一筆" }
@@ -85,6 +123,10 @@ class MathKeyboardService : InputMethodService() {
                         status.text = if (connection?.commitText(s, 1) == true) "已輸入 LaTeX" else "找不到可輸入的文字框"
                     } else status.text = "請先輸入或編輯 LaTeX"
                 }
+                "⌫" -> {
+                    if (!deleteTriggeredByHold) deleteCharacter()
+                    deleteTriggeredByHold = false
+                }
                 "🌐" -> {
                     // Ask Android to switch to the next enabled IME; picker is a fallback.
                     val switched = try { switchToNextInputMethod(false) } catch (_: Exception) { false }
@@ -94,14 +136,49 @@ class MathKeyboardService : InputMethodService() {
                 }
             }
         }
-        row("重新書寫", "完全離線 ✓") { label ->
+        row("重新書寫", "完全離線 ✓", "🌐") { label ->
             if (label == "重新書寫") {
                 handler.removeCallbacks(pending)
                 ink.clear()
                 status.text = "筆跡已清除，LaTeX 保留"
+            } else if (label == "🌐") {
+                val switched = try { switchToNextInputMethod(false) } catch (_: Exception) { false }
+                if (!switched) (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
             } else status.text = "完全離線：不使用 API、不上傳筆跡"
         }
         return root
+    }
+
+    /** Deletes in the ChatGPT/app text field, not the handwritten canvas.
+     * If the user is actively editing the local LaTeX field, delete there instead.
+     */
+    private fun deleteCharacter() {
+        if (formula.hasFocus()) {
+            val editable = formula.text
+            val start = minOf(formula.selectionStart, formula.selectionEnd).coerceAtLeast(0)
+            val end = maxOf(formula.selectionStart, formula.selectionEnd).coerceAtLeast(0)
+            if (start != end) {
+                editable.delete(start, end)
+            } else if (start > 0) {
+                val prev = Character.offsetByCodePoints(editable, start, -1)
+                editable.delete(prev, start)
+            }
+            return
+        }
+        val ic: InputConnection = currentInputConnection ?: run {
+            status.text = "找不到可刪除的輸入框"
+            return
+        }
+        try {
+            val selected = ic.getSelectedText(0)
+            if (!selected.isNullOrEmpty()) {
+                ic.commitText("", 1)
+            } else {
+                ic.deleteSurroundingTextInCodePoints(1, 0)
+            }
+        } catch (_: Exception) {
+            status.text = "刪除失敗，請重新點選輸入框"
+        }
     }
 
     private fun addSymbol(s: String) {
@@ -165,8 +242,10 @@ class MathKeyboardService : InputMethodService() {
 
     override fun onFinishInputView(finishingInput: Boolean) {
         handler.removeCallbacks(pending)
+        deleteRepeating = false
+        handler.removeCallbacks(deleteRepeat)
         super.onFinishInputView(finishingInput)
     }
 
-    override fun onDestroy() { handler.removeCallbacks(pending); recognizer?.close(); super.onDestroy() }
+    override fun onDestroy() { handler.removeCallbacks(pending); deleteRepeating = false; handler.removeCallbacks(deleteRepeat); recognizer?.close(); super.onDestroy() }
 }
