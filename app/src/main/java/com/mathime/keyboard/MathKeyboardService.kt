@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.view.inputmethod.InputMethodManager
+import android.os.Build
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -15,14 +16,13 @@ import android.widget.TextView
 class MathKeyboardService : InputMethodService() {
     private val handler = Handler(Looper.getMainLooper())
     private var auto = false
-    private lateinit var recognizer: OnnxMathRecognizer
+    private var recognizer: OnnxMathRecognizer? = null
     private lateinit var ink: HandwritingView
     private lateinit var formula: EditText
     private lateinit var status: TextView
     private val pending = Runnable { recognize() }
 
     override fun onCreateInputView(): View {
-        recognizer = OnnxMathRecognizer(this)
         val density = resources.displayMetrics.density
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -83,7 +83,13 @@ class MathKeyboardService : InputMethodService() {
                         status.text = if (connection?.commitText(s, 1) == true) "已輸入 LaTeX" else "找不到可輸入的文字框"
                     } else status.text = "請先輸入或編輯 LaTeX"
                 }
-                "🌐" -> (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
+                "🌐" -> {
+                    // Ask Android to switch to the next enabled IME; picker is a fallback.
+                    val switched = try { switchToNextInputMethod(false) } catch (_: Exception) { false }
+                    if (!switched) {
+                        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
+                    }
+                }
             }
         }
         row("重新書寫", "完全離線 ✓") { label ->
@@ -105,7 +111,12 @@ class MathKeyboardService : InputMethodService() {
         if (!ink.hasInk()) { status.text = "請先在白色區域書寫"; return }
         status.text = "正在本地辨識…"
         val bitmap = ink.exportInkBitmap() ?: run { status.text = "沒有可辨識的筆跡"; return }
-        recognizer.recognize(bitmap) { result ->
+        val engine = try { recognizer ?: OnnxMathRecognizer(applicationContext).also { recognizer = it } } catch (e: Throwable) {
+            bitmap.recycle()
+            status.text = "辨識引擎無法啟動：${e.message ?: e.javaClass.simpleName}"
+            return
+        }
+        engine.recognize(bitmap) { result ->
             bitmap.recycle()
             result.onSuccess { latex ->
                 formula.setText(latex)
@@ -117,5 +128,15 @@ class MathKeyboardService : InputMethodService() {
         }
     }
 
-    override fun onDestroy() { handler.removeCallbacks(pending); if (::recognizer.isInitialized) recognizer.close(); super.onDestroy() }
+    override fun onStartInputView(info: android.view.inputmethod.EditorInfo?, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        handler.removeCallbacks(pending)
+    }
+
+    override fun onFinishInputView(finishingInput: Boolean) {
+        handler.removeCallbacks(pending)
+        super.onFinishInputView(finishingInput)
+    }
+
+    override fun onDestroy() { handler.removeCallbacks(pending); recognizer?.close(); super.onDestroy() }
 }

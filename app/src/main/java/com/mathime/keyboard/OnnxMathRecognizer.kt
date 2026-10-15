@@ -20,7 +20,7 @@ class OnnxMathRecognizer(private val context: Context) {
     private val worker = Executors.newSingleThreadExecutor()
     fun recognize(bitmap: Bitmap, callback: (Result<String>) -> Unit) {
         worker.execute {
-            val result = runCatching { infer(bitmap) }
+            val result = try { Result.success(infer(bitmap)) } catch (t: Throwable) { Result.failure(t) }
             android.os.Handler(android.os.Looper.getMainLooper()).post { callback(result) }
         }
     }
