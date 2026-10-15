@@ -26,6 +26,7 @@ class MathKeyboardService : InputMethodService() {
     private var auto = false
     private var recognizer: OnnxMathRecognizer? = null
     private val symbolRecognizer = StrokeRecognizer()
+    private val singleGlyphRecognizer = SingleGlyphRecognizer()
     private var recognizing = false
     private var nextPrecise = false
     private var candidateIndex = 0
@@ -391,6 +392,8 @@ class MathKeyboardService : InputMethodService() {
             }
             return
         }
+        // Independent geometry classifier; never replace the formula model on ambiguous input.
+        val singleGlyph = if (calibrate) null else singleGlyphRecognizer.predict(ink.getStrokes())
         val precise = nextPrecise
         nextPrecise = false
         val variants = if (calibrate) {
@@ -417,11 +420,18 @@ class MathKeyboardService : InputMethodService() {
             val elapsed = android.os.SystemClock.elapsedRealtime() - startMs
             recognizing = false
             result.onSuccess { latex ->
-                candidateResults = engine.candidates()
+                val modelCandidates = engine.candidates()
+                val geometryCandidate = singleGlyph?.let {
+                    OnnxMathRecognizer.Candidate(it.latex, 0.0, "單字元幾何辨識（${(it.confidence*100).toInt()}% 規則分數）")
+                }
+                candidateResults = if (geometryCandidate != null) {
+                    listOf(geometryCandidate) + modelCandidates.filterNot { it.latex.trim() == geometryCandidate.latex.trim() }
+                } else modelCandidates
                 candidateIndex = 0
                 refreshCandidateButtons()
-                formula.setText(latex)
-                formula.setSelection(latex.length)
+                val selected = candidateResults.firstOrNull()?.latex ?: latex
+                formula.setText(selected)
+                formula.setSelection(selected.length)
                 status.text = "候選 1/${candidateResults.size} · ${candidateResults.firstOrNull()?.source ?: ""}，耗時 ${elapsed}ms，請核對預覽"
             }.onFailure { error ->
                 status.text = error.message ?: "辨識失敗；筆跡已保留"
