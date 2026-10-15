@@ -38,20 +38,46 @@ class OnnxMathRecognizer(private val context: Context) {
     fun diagnosticFile(): File = File(context.filesDir, "comer_diagnostics.txt")
     private fun saveDiagnostics() { diagnosticFile().writeText(diagnostics.toString()) }
 
-    data class Candidate(val latex: String, val score: Double)
+    data class Candidate(val latex: String, val score: Double, val source: String = "原始筆跡")
     private var lastCandidates: List<Candidate> = emptyList()
     fun candidates(): List<Candidate> = lastCandidates.toList()
 
-    fun recognize(bitmap: Bitmap, callback: (Result<String>) -> Unit) {
+    /** Runs all variants sequentially on the same worker, retaining independent diagnostics.
+     * Scores from different images are not calibrated: keep original-image results first,
+     * and use other variants as alternative candidates, not asserted improvements.
+     */
+    fun recognizeVariants(variants: List<Pair<String, Bitmap>>, callback: (Result<String>) -> Unit) {
         worker.execute {
             diagnostics.setLength(0)
-            record("MathIME v1.0.3 beam search diagnostics")
-            val result = runCatching { infer(bitmap) }
+            record("MathIME v1.0.5 finger handwriting multi-variant diagnostics")
+            val result = runCatching {
+                val combined = mutableListOf<Candidate>()
+                val failures = mutableListOf<String>()
+                for ((name, bitmap) in variants) {
+                    record("=== variant: $name ===")
+                    try {
+                        infer(bitmap)
+                        val candidatesForVariant = lastCandidates.toList()
+                        record("Variant $name: ${candidatesForVariant.joinToString { it.latex }}")
+                        combined.addAll(candidatesForVariant.map { it.copy(source = name) })
+                    } catch (e: Throwable) {
+                        failures.add("$name: ${e.message}")
+                        record("Variant failed: $name ${e.stackTraceToString()}")
+                    }
+                }
+                lastCandidates = combined.distinctBy { it.latex.replace(" ", "") }.take(9)
+                record("Merged candidates: ${lastCandidates.size}; failures=$failures")
+                lastCandidates.firstOrNull()?.latex ?: error("辨識失敗：${failures.joinToString()}")
+            }
+            variants.forEach { (_, bitmap) -> runCatching { bitmap.recycle() } }
             result.onFailure { record("ERROR: ${it.stackTraceToString()}") }
             runCatching { saveDiagnostics() }
             main.post { callback(result) }
         }
     }
+
+    fun recognize(bitmap: Bitmap, callback: (Result<String>) -> Unit) =
+        recognizeVariants(listOf("原始筆跡" to bitmap), callback)
 
     private fun initialize() {
         if (encoder != null) return
@@ -157,8 +183,8 @@ class OnnxMathRecognizer(private val context: Context) {
                     // Beam search: rank complete sequences by accumulated log probability.
                     // All candidates come from the real decoder; no hard-coded formula substitution.
                     data class Beam(val ids: List<Long>, val logp: Double, val ended: Boolean)
-                    val width = 3
-                    val maxTokens = 96
+                    val width = 5 // internal beams; show up to three valid candidates
+                    val maxTokens = 80
                     var beams = listOf(Beam(listOf(1L), 0.0, false))
                     for (step in 0 until maxTokens) {
                         val expanded = ArrayList<Beam>()
@@ -185,8 +211,9 @@ class OnnxMathRecognizer(private val context: Context) {
                                         // Discourage decoder loops that repeat a complete multi-token
                                         // segment twice (e.g. identical radicals). Do not ban repetition:
                                         // legitimate expressions may contain the same factor twice.
-                                        val loopPenalty = if (id != 2 && repeatsTailBlock(nextIds)) 1.8 else 0.0
-                                        expanded.add(Beam(nextIds, beam.logp + logits[id].toDouble() - logNorm - loopPenalty, id == 2))
+                                        val loopPenalty = if (id != 2 && repeatsTailBlock(nextIds)) 4.0 else 0.0
+                                        val symbolPenalty = if (id != 2 && repeatedSingleSymbol(nextIds, vocab)) 2.0 else 0.0
+                                        expanded.add(Beam(nextIds, beam.logp + logits[id].toDouble() - logNorm - loopPenalty - symbolPenalty, id == 2))
                                     }
                                 }
                             }
@@ -198,13 +225,20 @@ class OnnxMathRecognizer(private val context: Context) {
                     }
                     val finished = beams.filter { it.ended }
                     if (finished.isEmpty()) record("WARNING: no EOS among final beams")
+                    // Rank by model likelihood plus *soft* structure and loop penalties.
+                    // Never delete or replace an actual predicted token (including E).
                     val ordered = (if (finished.isNotEmpty()) finished else beams)
-                        .sortedByDescending { it.logp / it.ids.size.toDouble().coerceAtLeast(2.0).pow(0.6) }
-                    lastCandidates = ordered.mapNotNull { beam ->
-                        val tokens = beam.ids.drop(1).takeWhile { it != 2L }.mapNotNull { vocab[it.toInt()] }
-                        val latex = tokens.joinToString(" ").trim()
-                        if (latex.isBlank()) null else Candidate(latex, beam.logp)
-                    }.distinctBy { it.latex }.take(3)
+                        .map { beam ->
+                            val tokens = beam.ids.drop(1).takeWhile { it != 2L }.mapNotNull { vocab[it.toInt()] }
+                            val latex = tokens.joinToString(" ").trim()
+                            val syntaxPenalty = structurePenalty(tokens)
+                            val lengthScore = beam.logp / beam.ids.size.toDouble().coerceAtLeast(2.0).pow(0.6)
+                            Triple(latex, lengthScore - syntaxPenalty, beam)
+                        }
+                        .filter { it.first.isNotBlank() }
+                        .sortedByDescending { it.second }
+                    lastCandidates = ordered.distinctBy { it.first }
+                        .take(3).map { Candidate(it.first, it.second) }
                     lastCandidates.forEachIndexed { index, candidate -> record("Candidate ${index + 1}: score=${candidate.score} latex=${candidate.latex}") }
                     return lastCandidates.firstOrNull()?.latex ?: error("模型沒有產生有效公式；請分享診斷檔")
                 }
@@ -222,6 +256,37 @@ class OnnxMathRecognizer(private val context: Context) {
             if (tokens.subList(n - 2 * length, n - length) == tokens.subList(n - length, n)) return true
         }
         return false
+    }
+
+    /** Penalize malformed LaTeX structure; never silently rewrite the user's formula. */
+    private fun structurePenalty(tokens: List<String>): Double {
+        var braces = 0
+        var parentheses = 0
+        var penalty = 0.0
+        for (token in tokens) {
+            when (token) {
+                "{" -> braces++
+                "}" -> { braces--; if (braces < 0) { penalty += 6.0; braces = 0 } }
+                "(" -> parentheses++
+                ")" -> { parentheses--; if (parentheses < 0) { penalty += 3.0; parentheses = 0 } }
+            }
+        }
+        penalty += braces * 3.0 + parentheses * 1.5
+        // Penalize an implausible run of 4+ identical letter tokens.
+        // Repeated terms such as x+x remain possible.
+        for (i in 3 until tokens.size) {
+            val t = tokens[i]
+            if (t.length == 1 && t[0].isLetter() && tokens.subList(i-3, i+1).all { it == t }) penalty += 2.5
+        }
+        return penalty
+    }
+
+    private fun repeatedSingleSymbol(ids: List<Long>, vocab: Map<Int, String>): Boolean {
+        if (ids.size < 5) return false
+        val last = ids.takeLast(4)
+        if (last.distinct().size != 1) return false
+        val token = vocab[last[0].toInt()] ?: return false
+        return token.length == 1 && token[0].isLetter()
     }
 
     fun close() {

@@ -62,7 +62,7 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME v1.0.3 · 手動辨識"
+            text = "MathIME v1.0.5 · 手動辨識"
             textSize = 12f
             setTextColor(Color.rgb(60, 70, 86))
         }
@@ -94,14 +94,14 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.WHITE)
         }
         prevButton = Button(this).apply {
-            text = "◀"; textSize = 14f; isAllCaps = false
+            text = "‹"; textSize = 18f; isAllCaps = false
             setOnClickListener { selectCandidate(-1) }
         }
         nextButton = Button(this).apply {
-            text = "▶"; textSize = 14f; isAllCaps = false
+            text = "›"; textSize = 18f; isAllCaps = false
             setOnClickListener { selectCandidate(1) }
         }
-        previewRow.addView(prevButton, LinearLayout.LayoutParams((density * 52).toInt(), (density * 72).toInt()))
+        previewRow.addView(prevButton, LinearLayout.LayoutParams((density * 38).toInt(), (density * 66).toInt()))
         previewReady = false
         preview = WebView(this).apply {
             setBackgroundColor(Color.WHITE)
@@ -121,7 +121,7 @@ class MathKeyboardService : InputMethodService() {
             loadUrl("file:///android_asset/preview.html")
         }
         previewRow.addView(preview, LinearLayout.LayoutParams(0, (density * 86).toInt(), 1f))
-        previewRow.addView(nextButton, LinearLayout.LayoutParams((density * 52).toInt(), (density * 72).toInt()))
+        previewRow.addView(nextButton, LinearLayout.LayoutParams((density * 38).toInt(), (density * 66).toInt()))
         root.addView(previewRow)
         previewState = TextView(this).apply { text = "預覽引擎載入中…"; textSize = 11f }
         root.addView(previewState)
@@ -202,7 +202,7 @@ class MathKeyboardService : InputMethodService() {
                 "自動/手動" -> {
                     auto = !auto
                     handler.removeCallbacks(pending)
-                    status.text = if (auto) "MathIME v1.0.3 · 自動辨識" else "MathIME v1.0.3 · 手動辨識"
+                    status.text = if (auto) "MathIME v1.0.5 · 自動辨識" else "MathIME v1.0.5 · 手動辨識"
                 }
                 "輸入" -> {
                     val s = formula.text.toString()
@@ -250,7 +250,7 @@ class MathKeyboardService : InputMethodService() {
         formula.setText(latex)
         formula.setSelection(latex.length)
         refreshCandidateButtons()
-        status.text = "候選 ${candidateIndex + 1}/${candidateResults.size}，請核對預覽"
+        status.text = "候選 ${candidateIndex + 1}/${candidateResults.size} · ${candidateResults[candidateIndex].source}，請核對預覽"
     }
 
     private fun refreshPreviewState() {
@@ -355,27 +355,27 @@ class MathKeyboardService : InputMethodService() {
             }
             return
         }
-        val bitmap = ink.exportInkBitmap() ?: run { status.text = "沒有可辨識的筆跡"; return }
+        val variants = ink.exportVariants()
+        if (variants.isEmpty()) { status.text = "沒有可辨識的筆跡"; return }
         recognizing = true
         status.text = "正在本地模型辨識…"
         val engine = try {
             recognizer ?: OnnxMathRecognizer(applicationContext).also { recognizer = it }
         } catch (e: Throwable) {
             recognizing = false
-            bitmap.recycle()
+            variants.forEach { it.second.recycle() }
             status.text = "辨識引擎無法啟動：${e.message ?: e.javaClass.simpleName}"
             return
         }
-        engine.recognize(bitmap) { result ->
+        engine.recognizeVariants(variants) { result ->
             recognizing = false
-            bitmap.recycle()
             result.onSuccess { latex ->
                 candidateResults = engine.candidates()
                 candidateIndex = 0
                 refreshCandidateButtons()
                 formula.setText(latex)
                 formula.setSelection(latex.length)
-                status.text = "候選 1/${candidateResults.size}，請核對公式預覽"
+                status.text = "候選 1/${candidateResults.size} · ${candidateResults.firstOrNull()?.source ?: ""}，請核對預覽"
             }.onFailure { error ->
                 status.text = error.message ?: "辨識失敗；筆跡已保留"
             }

@@ -65,6 +65,63 @@ class HandwritingView(context: Context) : View(context) {
     fun getStrokes(): List<List<PointF>> = strokes.map { stroke -> stroke.map { PointF(it.x, it.y) } }
     fun hasInk() = paths.isNotEmpty()
 
+    /** Three conservative input variants. Never infer a glyph identity or replace symbols.
+     * ORIGINAL is the untouched path; SMOOTH and SHAPE use recorded touch coordinates.
+     */
+    fun exportVariants(): List<Pair<String, Bitmap>> {
+        val original = exportInkBitmap() ?: return emptyList()
+        val snapshot = getStrokes()
+        return listOf(
+            "原始筆跡" to original,
+            "輕度平滑" to renderStrokes(snapshot, 0.22f, 7f),
+            "保守字形修正" to renderStrokes(snapshot, 0.40f, 6f)
+        )
+    }
+
+    private fun renderStrokes(source: List<List<PointF>>, smoothing: Float, width: Float): Bitmap {
+        val all = source.flatten()
+        if (all.isEmpty()) return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        val left = all.minOf { it.x }; val right = all.maxOf { it.x }
+        val top = all.minOf { it.y }; val bottom = all.maxOf { it.y }
+        val margin = 24f
+        val naturalW = max(1f, right - left + 2 * margin)
+        val naturalH = max(1f, bottom - top + 2 * margin)
+        val scale = minOf(1f, 1024f / max(naturalW, naturalH))
+        val bmp = Bitmap.createBitmap(max(1, (naturalW * scale).toInt()), max(1, (naturalH * scale).toInt()), Bitmap.Config.ARGB_8888)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK; strokeWidth = width; style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+        }
+        Canvas(bmp).apply {
+            drawColor(Color.WHITE)
+            scale(scale, scale)
+            translate(-left + margin, -top + margin)
+            source.forEach { stroke ->
+                if (stroke.isEmpty()) return@forEach
+                val path = Path()
+                val points = stroke.mapIndexed { index, point ->
+                    if (index == 0 || index == stroke.lastIndex || stroke.size < 3) point
+                    else {
+                        val before = stroke[index - 1]; val after = stroke[index + 1]
+                        // Preserve sharp corners: smoothing only when direction is consistent.
+                        val ax = point.x - before.x; val ay = point.y - before.y
+                        val bx = after.x - point.x; val by = after.y - point.y
+                        val dot = ax * bx + ay * by
+                        if (dot <= 0f) point else PointF(
+                            point.x * (1f - smoothing) + (before.x + after.x) * smoothing / 2f,
+                            point.y * (1f - smoothing) + (before.y + after.y) * smoothing / 2f
+                        )
+                    }
+                }
+                path.moveTo(points[0].x, points[0].y)
+                for (i in 1 until points.size) path.lineTo(points[i].x, points[i].y)
+                if (points.size == 1) path.lineTo(points[0].x + .1f, points[0].y)
+                drawPath(path, paint)
+            }
+        }
+        return bmp
+    }
+
     /** Cropped white-background bitmap, with padding, suitable for future model input. */
     fun exportInkBitmap(maxDimension: Int = 1024): Bitmap? {
         if (paths.isEmpty()) return null
