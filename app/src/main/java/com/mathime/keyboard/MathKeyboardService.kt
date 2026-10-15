@@ -393,7 +393,8 @@ class MathKeyboardService : InputMethodService() {
             return
         }
         // Independent geometry classifier; never replace the formula model on ambiguous input.
-        val singleGlyph = if (calibrate) null else singleGlyphRecognizer.predict(ink.getStrokes())
+        val geometryAnalysis = if (calibrate) null else singleGlyphRecognizer.analyze(ink.getStrokes())
+        val singleGlyph = geometryAnalysis?.prediction
         val precise = nextPrecise
         nextPrecise = false
         val variants = if (calibrate) {
@@ -417,6 +418,7 @@ class MathKeyboardService : InputMethodService() {
         engine.setPrecisionMode(precise)
         engine.setCalibrationMode(calibrate)
         engine.recognizeVariants(variants) { result ->
+            geometryAnalysis?.let { engine.appendExternalDiagnostic(it.diagnostic) }
             val elapsed = android.os.SystemClock.elapsedRealtime() - startMs
             recognizing = false
             result.onSuccess { latex ->

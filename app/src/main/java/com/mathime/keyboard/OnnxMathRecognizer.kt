@@ -36,6 +36,12 @@ class OnnxMathRecognizer(private val context: Context) {
         Log.i("MathIME-CoMER", message.take(3500))
     }
     fun diagnosticFile(): File = File(context.filesDir, "comer_diagnostics.txt")
+    /** Called on the main thread after worker completion; retains stroke diagnostic in shared log. */
+    fun appendExternalDiagnostic(message: String) {
+        record(message)
+        saveDiagnostics()
+    }
+
     private fun saveDiagnostics() { diagnosticFile().writeText(diagnostics.toString()) }
 
     data class Candidate(val latex: String, val score: Double, val source: String = "原始筆跡")
@@ -57,7 +63,7 @@ class OnnxMathRecognizer(private val context: Context) {
         worker.execute {
             diagnostics.setLength(0)
             uncertain = false
-            record("MathIME v1.0.15 diagnostics; mode=${if (calibrationMode) "calibration" else if (precisionMode) "precise" else "fast"}")
+            record("MathIME v1.0.16 diagnostics; mode=${if (calibrationMode) "calibration" else if (precisionMode) "precise" else "fast"}")
             val totalStart = android.os.SystemClock.elapsedRealtime()
             val result = runCatching {
                 val combined = mutableListOf<Candidate>()
