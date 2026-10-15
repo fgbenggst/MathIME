@@ -52,12 +52,12 @@ class OnnxMathRecognizer(private val context: Context) {
     fun recognizeVariants(variants: List<Pair<String, Bitmap>>, callback: (Result<String>) -> Unit) {
         worker.execute {
             diagnostics.setLength(0)
-            record("MathIME v1.0.8 diagnostics; mode=${if (precisionMode) "precise" else "fast"}")
+            record("MathIME v1.0.9 diagnostics; mode=${if (precisionMode) "precise" else "fast"}")
             val totalStart = android.os.SystemClock.elapsedRealtime()
             val result = runCatching {
                 val combined = mutableListOf<Candidate>()
                 val failures = mutableListOf<String>()
-                for ((variantIndex, pair) in variants.withIndex()) {
+                for ((variantIndex, pair) in variants.take(if (precisionMode) 2 else 1).withIndex()) {
                     val variantStart = android.os.SystemClock.elapsedRealtime()
                     val (name, bitmap) = pair
                     runCatching {
@@ -217,12 +217,17 @@ class OnnxMathRecognizer(private val context: Context) {
                     // Beam search: rank complete sequences by accumulated log probability.
                     // All candidates come from the real decoder; no hard-coded formula substitution.
                     data class Beam(val ids: List<Long>, val logp: Double, val ended: Boolean)
-                    val width = if (precisionMode) 9 else 3
-                    val maxTokens = if (precisionMode) 64 else 36
+                    val width = if (precisionMode) 5 else 3
+                    val maxTokens = if (precisionMode) 40 else 36
+                    val decoderBudgetMs = if (precisionMode) 2500L else 1500L
                     val decodeStart = android.os.SystemClock.elapsedRealtime()
                     var beams = listOf(Beam(listOf(1L), 0.0, false))
                     val completed = ArrayList<Beam>()
                     for (step in 0 until maxTokens) {
+                        if (step > 0 && android.os.SystemClock.elapsedRealtime() - decodeStart >= decoderBudgetMs) {
+                            record("Decoder time budget reached at step=$step; completed=${completed.size}")
+                            break
+                        }
                         val expanded = ArrayList<Beam>()
                         for (beam in beams) {
                             if (beam.ended) { completed.add(beam); continue }
@@ -266,7 +271,7 @@ class OnnxMathRecognizer(private val context: Context) {
                             if (beams.first().logp < third - 1.5) break
                         }
                     }
-                    record("Decoder elapsedMs=${android.os.SystemClock.elapsedRealtime() - decodeStart}")
+                    record("Decoder elapsedMs=${android.os.SystemClock.elapsedRealtime() - decodeStart}; budgetMs=$decoderBudgetMs; width=$width")
                     val finished = completed.distinctBy { it.ids }
                     record("Beam finished hypotheses retained=${finished.size}, active=${beams.size}")
                     if (finished.isEmpty()) record("WARNING: no EOS among final beams")
@@ -277,7 +282,7 @@ class OnnxMathRecognizer(private val context: Context) {
                             val tokens = beam.ids.drop(1).takeWhile { it != 2L }.mapNotNull { vocab[it.toInt()] }
                             val latex = tokens.joinToString(" ").trim()
                             val syntaxPenalty = structurePenalty(tokens)
-                            val lengthScore = beam.logp / beam.ids.size.toDouble().coerceAtLeast(2.0).pow(0.6)
+                            val lengthScore = beam.logp / beam.ids.size.toDouble().coerceAtLeast(2.0).pow(0.25)
                             Triple(latex, lengthScore - syntaxPenalty, beam)
                         }
                         .filter { it.first.isNotBlank() }

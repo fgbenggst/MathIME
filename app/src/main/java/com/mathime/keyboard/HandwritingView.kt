@@ -11,11 +11,16 @@ import android.graphics.RectF
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.max
+import kotlin.math.hypot
 
 class HandwritingView(context: Context) : View(context) {
     private val paths = mutableListOf<Path>()
     private val strokes = mutableListOf<MutableList<PointF>>()
     private var active: Path? = null
+    var eraserMode: Boolean = false
+        set(value) { field = value; active = null; invalidate() }
+    private val eraserRadius = 22f
+    private var lastErase: PointF? = null
     var onStrokeFinished: (() -> Unit)? = null
     private val pen = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.BLACK
@@ -33,11 +38,21 @@ class HandwritingView(context: Context) : View(context) {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
+                if (eraserMode) {
+                    lastErase = PointF(event.x, event.y)
+                    eraseAt(event.x, event.y)
+                    return true
+                }
                 active = Path().also { it.moveTo(event.x, event.y); paths.add(it) }
                 strokes.add(mutableListOf(PointF(event.x, event.y)))
                 invalidate(); return true
             }
             MotionEvent.ACTION_MOVE -> {
+                if (eraserMode) {
+                    for (i in 0 until event.historySize) eraseBetween(event.getHistoricalX(i), event.getHistoricalY(i))
+                    eraseBetween(event.x, event.y)
+                    return true
+                }
                 active?.let { path ->
                     for (i in 0 until event.historySize) {
                         val x = event.getHistoricalX(i); val y = event.getHistoricalY(i)
@@ -49,6 +64,12 @@ class HandwritingView(context: Context) : View(context) {
                 invalidate(); return true
             }
             MotionEvent.ACTION_UP -> {
+                if (eraserMode) {
+                    eraseBetween(event.x, event.y)
+                    lastErase = null
+                    onStrokeFinished?.invoke()
+                    return true
+                }
                 active?.lineTo(event.x, event.y)
                 strokes.lastOrNull()?.add(PointF(event.x, event.y))
                 active = null
@@ -60,6 +81,55 @@ class HandwritingView(context: Context) : View(context) {
         }
         return true
     }
+    private fun eraseBetween(x: Float, y: Float) {
+        val prev = lastErase
+        if (prev != null) {
+            val distance = hypot(x - prev.x, y - prev.y)
+            val steps = (distance / (eraserRadius * 0.45f)).toInt().coerceAtLeast(1)
+            for (i in 1..steps) {
+                val t = i.toFloat() / steps
+                eraseAt(prev.x + (x - prev.x) * t, prev.y + (y - prev.y) * t)
+            }
+        } else eraseAt(x, y)
+        lastErase = PointF(x, y)
+    }
+
+    /** Erase actual stroke geometry rather than painting white pixels.
+     * This keeps the exported model image and stroke data consistent.
+     */
+    private fun eraseAt(x: Float, y: Float) {
+        val rebuilt = mutableListOf<MutableList<PointF>>()
+        for (stroke in strokes) {
+            var piece = mutableListOf<PointF>()
+            for (point in stroke) {
+                val erased = hypot(point.x - x, point.y - y) <= eraserRadius
+                if (erased) {
+                    if (piece.isNotEmpty()) rebuilt.add(piece)
+                    piece = mutableListOf()
+                } else piece.add(PointF(point.x, point.y))
+            }
+            if (piece.isNotEmpty()) rebuilt.add(piece)
+        }
+        strokes.clear()
+        strokes.addAll(rebuilt)
+        rebuildPaths()
+        invalidate()
+    }
+
+    private fun rebuildPaths() {
+        paths.clear()
+        strokes.forEach { stroke ->
+            if (stroke.isNotEmpty()) {
+                val path = Path().apply {
+                    moveTo(stroke[0].x, stroke[0].y)
+                    if (stroke.size == 1) lineTo(stroke[0].x + .1f, stroke[0].y)
+                    else for (i in 1 until stroke.size) lineTo(stroke[i].x, stroke[i].y)
+                }
+                paths.add(path)
+            }
+        }
+    }
+
     fun undo() { if (paths.isNotEmpty()) { paths.removeAt(paths.lastIndex); strokes.removeAt(strokes.lastIndex) }; invalidate() }
     fun clear() { paths.clear(); strokes.clear(); invalidate() }
     fun getStrokes(): List<List<PointF>> = strokes.map { stroke -> stroke.map { PointF(it.x, it.y) } }

@@ -63,7 +63,7 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME v1.0.8 · 手動辨識"
+            text = "MathIME v1.0.10 · 手動辨識"
             textSize = 12f
             setTextColor(Color.rgb(60, 70, 86))
         }
@@ -195,15 +195,20 @@ class MathKeyboardService : InputMethodService() {
         }
         row("∫", "∂", "∞", "Σ", "√", "π") { addSymbol(it) }
         row("^", "_", "\\frac{}{}", "\\lim_{}", "dx", "=") { addSymbol(it) }
-        row("辨識", "復原", "重寫", "自動/手動", "輸入", "⌫") { label ->
+        row("辨識", "橡皮擦", "復原", "重寫", "自動/手動", "輸入", "⌫") { label ->
             when (label) {
                 "辨識" -> recognize()
+                "橡皮擦" -> {
+                    handler.removeCallbacks(pending)
+                    ink.eraserMode = !ink.eraserMode
+                    status.text = if (ink.eraserMode) "橡皮擦模式：滑動擦除筆畫；再按一次恢復書寫" else "畫筆模式"
+                }
                 "復原" -> { handler.removeCallbacks(pending); ink.undo(); status.text = "已復原上一筆" }
                 "重寫" -> clearHandwriting()
                 "自動/手動" -> {
                     auto = !auto
                     handler.removeCallbacks(pending)
-                    status.text = if (auto) "MathIME v1.0.8 · 自動辨識" else "MathIME v1.0.8 · 手動辨識"
+                    status.text = if (auto) "MathIME v1.0.10 · 自動辨識" else "MathIME v1.0.10 · 手動辨識"
                 }
                 "輸入" -> {
                     val s = formula.text.toString()
