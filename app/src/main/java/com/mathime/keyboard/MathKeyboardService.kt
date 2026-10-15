@@ -26,6 +26,7 @@ class MathKeyboardService : InputMethodService() {
     private lateinit var status: TextView
     private val pending = Runnable { recognize() }
     private var deleteRepeating = false
+    private var holdRunnable: Runnable? = null
     private var deleteTriggeredByHold = false
     private val deleteRepeat = object : Runnable {
         override fun run() {
@@ -44,7 +45,7 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME 0.7 開發版｜離線辨識；完整公式模型尚未提供"
+            text = "MathIME 0.9｜CoMER 離線手寫公式辨識"
             textSize = 13f
         }
         root.addView(status)
@@ -82,18 +83,20 @@ class MathKeyboardService : InputMethodService() {
                                 deleteTriggeredByHold = false
                                 deleteRepeating = false
                                 handler.removeCallbacks(deleteRepeat)
-                                handler.postDelayed({
+                                holdRunnable?.let(handler::removeCallbacks)
+                                holdRunnable = Runnable {
                                     if (button.isPressed) {
                                         deleteTriggeredByHold = true
                                         deleteRepeating = true
                                         deleteRepeat.run()
                                     }
-                                }, 450L)
+                                }.also { handler.postDelayed(it, 450L) }
                                 false
                             }
                             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                                 deleteRepeating = false
                                 handler.removeCallbacks(deleteRepeat)
+                                holdRunnable?.let(handler::removeCallbacks)
                                 false
                             }
                             else -> false
@@ -144,7 +147,7 @@ class MathKeyboardService : InputMethodService() {
             } else if (label == "🌐") {
                 val switched = try { switchToNextInputMethod(false) } catch (_: Exception) { false }
                 if (!switched) (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
-            } else status.text = if (hasModelFiles()) "已找到模型檔案；相容性需實際辨識驗證" else "缺少 math_ctc.onnx / tokens.txt；僅能嘗試單符號"
+            } else status.text = if (hasModelFiles()) "已找到模型檔案；相容性需實際辨識驗證" else "缺少 CoMER ONNX 模型檔案"
         }
         return root
     }
@@ -187,16 +190,15 @@ class MathKeyboardService : InputMethodService() {
     }
 
     private fun hasModelFiles(): Boolean = try {
-        assets.open("math_ctc.onnx").close()
-        assets.open("tokens.txt").close()
+        assets.open("encoder_int8.onnx").close()
+        assets.open("decoder_int8.onnx").close()
         true
     } catch (_: java.io.IOException) { false }
 
     private fun recognize() {
         if (recognizing) return
         if (!ink.hasInk()) { status.text = "請先在白色區域書寫"; return }
-        // An actual pretrained model may be supplied later. Until then use an honest,
-        // deliberately limited single-stroke recognizer rather than fabricated LaTeX.
+        // Prefer actual CoMER inference; fall back only when model assets are missing.
         val hasModel = hasModelFiles()
         if (!hasModel) {
             val strokes = ink.getStrokes()
@@ -248,8 +250,9 @@ class MathKeyboardService : InputMethodService() {
         handler.removeCallbacks(pending)
         deleteRepeating = false
         handler.removeCallbacks(deleteRepeat)
+        holdRunnable?.let(handler::removeCallbacks)
         super.onFinishInputView(finishingInput)
     }
 
-    override fun onDestroy() { handler.removeCallbacks(pending); deleteRepeating = false; handler.removeCallbacks(deleteRepeat); recognizer?.close(); super.onDestroy() }
+    override fun onDestroy() { handler.removeCallbacks(pending); deleteRepeating = false; handler.removeCallbacks(deleteRepeat); holdRunnable?.let(handler::removeCallbacks); recognizer?.close(); super.onDestroy() }
 }
