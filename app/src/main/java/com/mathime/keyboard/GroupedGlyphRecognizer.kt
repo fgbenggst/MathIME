@@ -26,6 +26,22 @@ class GroupedGlyphRecognizer(private val single: SingleGlyphRecognizer) {
         val log=StringBuilder("GroupedGlyph: strokes=${strokes.size}")
         if(strokes.size !in 2..8)return Result(null,log.append("; abstain=stroke count outside 2..8").toString())
         val bb=strokes.map(::bounds)
+        val all=strokes.flatten()
+        val overall=bounds(all)
+        // A long horizontal stroke crossing the middle of a vertically stacked
+        // expression is a likely fraction bar. Do not interpret it as a glyph.
+        val fractionBar=strokes.indices.any { i ->
+            val b=bb[i]
+            val a=strokes[i].first()
+            val z=strokes[i].last()
+            val dx=abs(z.x-a.x)
+            val dy=abs(z.y-a.y)
+            b.w>overall.w*.60f && b.h<overall.h*.16f &&
+                dx>overall.w*.55f && dy<dx*.18f &&
+                strokes.indices.any { j -> j!=i && bb[j].cy < b.cy-b.h } &&
+                strokes.indices.any { j -> j!=i && bb[j].cy > b.cy+b.h }
+        }
+        if(fractionBar)return Result(null,log.append("; abstain=fraction bar / vertical layout").toString())
         val parent=IntArray(strokes.size){it}
         fun root(i:Int):Int {
             var x=i
@@ -52,7 +68,7 @@ class GroupedGlyphRecognizer(private val single: SingleGlyphRecognizer) {
         val glyphs=mutableListOf<String>()
         for((i,group) in groups.withIndex()){
             val shape=single.analyze(group)
-            val candidate=shape.prediction ?: classifyThree(group)
+            val candidate=shape.prediction ?: classifyThree(group) ?: classifyTwo(group) ?: classifyFive(group)
             log.append("; g").append(i).append("=")
                 .append(candidate?.latex ?: "?")
                 .append(" [").append(shape.diagnostic).append("]")
@@ -68,6 +84,50 @@ class GroupedGlyphRecognizer(private val single: SingleGlyphRecognizer) {
      * Requires two rightward bulges with an inward left turn at mid-height.
      * The checks are intentionally strict to avoid silently rewriting equations.
      */
+    private fun normalize(group:List<List<PointF>>):List<PointF>? {
+        if(group.size!=1 || group[0].size<12)return null
+        val raw=group[0]
+        val b=bounds(raw)
+        if(b.w<18f || b.h<25f)return null
+        return raw.map { PointF((it.x-b.l)/b.w,(it.y-b.t)/b.h) }
+    }
+    private fun classifyTwo(group:List<List<PointF>>):SingleGlyphRecognizer.Prediction? {
+        val p=normalize(group)?:return null
+        for(q in listOf(p,p.reversed())){
+            if(q.first().y>.32f || q.last().y<.65f || q.last().x<.62f)continue
+            val upper=q.filter{it.y<.42f}
+            val lower=q.filter{it.y>.66f}
+            if(upper.size<4 || lower.size<4)continue
+            val rightUpper=upper.maxOf{it.x}
+            val leftLower=lower.minOf{it.x}
+            val tail=q.takeLast(max(3,q.size/7))
+            if(rightUpper>.67f && leftLower<.35f &&
+               tail.last().x-tail.first().x>.20f &&
+               abs(tail.last().y-tail.first().y)<.22f &&
+               q.last().x-leftLower>.40f)
+                return SingleGlyphRecognizer.Prediction("2",.73f,"upper arc, lower-left bend and rightward tail")
+        }
+        return null
+    }
+    private fun classifyFive(group:List<List<PointF>>):SingleGlyphRecognizer.Prediction? {
+        val p=normalize(group)?:return null
+        for(q in listOf(p,p.reversed())){
+            val first=q.first();val last=q.last()
+            if(first.y>.25f || last.y<.65f)continue
+            val top=q.filter{it.y<.23f}
+            val mid=q.filter{it.y in .34f.. .65f}
+            val bottom=q.filter{it.y>.70f}
+            if(top.size<3 || mid.size<3 || bottom.size<3)continue
+            val topWidth=top.maxOf{it.x}-top.minOf{it.x}
+            val midLeft=mid.minOf{it.x}
+            val lowerRight=bottom.maxOf{it.x}
+            if(topWidth>.30f && midLeft<.35f && lowerRight>.65f &&
+               last.x<.58f && q.any{it.x>.82f && it.y>.50f})
+                return SingleGlyphRecognizer.Prediction("5",.70f,"top stroke, left spine and lower right bulge")
+        }
+        return null
+    }
+
     private fun classifyThree(group:List<List<PointF>>):SingleGlyphRecognizer.Prediction? {
         if(group.size!=1)return null
         val raw=group[0]

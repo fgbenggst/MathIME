@@ -63,7 +63,7 @@ class OnnxMathRecognizer(private val context: Context) {
         worker.execute {
             diagnostics.setLength(0)
             uncertain = false
-            record("MathIME v1.0.17 diagnostics; mode=${if (calibrationMode) "calibration" else if (precisionMode) "precise" else "fast"}")
+            record("MathIME v1.0.18 diagnostics; mode=${if (calibrationMode) "calibration" else if (precisionMode) "precise" else "fast"}")
             val totalStart = android.os.SystemClock.elapsedRealtime()
             val result = runCatching {
                 val combined = mutableListOf<Candidate>()

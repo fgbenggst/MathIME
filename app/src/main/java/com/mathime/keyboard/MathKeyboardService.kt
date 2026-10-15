@@ -65,7 +65,7 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME v1.0.10 · 手動辨識"
+            text = "MathIME v1.0.18 · 手動辨識"
             textSize = 12f
             setTextColor(Color.rgb(60, 70, 86))
         }
@@ -210,7 +210,7 @@ class MathKeyboardService : InputMethodService() {
                 "自動/手動" -> {
                     auto = !auto
                     handler.removeCallbacks(pending)
-                    status.text = if (auto) "MathIME v1.0.10 · 自動辨識" else "MathIME v1.0.10 · 手動辨識"
+                    status.text = if (auto) "MathIME v1.0.18 · 自動辨識" else "MathIME v1.0.18 · 手動辨識"
                 }
                 "輸入" -> {
                     val s = formula.text.toString()
@@ -303,7 +303,7 @@ class MathKeyboardService : InputMethodService() {
             })
             val intent = android.content.Intent(android.content.Intent.ACTION_SEND_MULTIPLE).apply {
                 type = "*/*"
-                putExtra(android.content.Intent.EXTRA_SUBJECT, "MathIME v1.0.12 辨識診斷")
+                putExtra(android.content.Intent.EXTRA_SUBJECT, "MathIME v1.0.18 辨識診斷")
                 putExtra(android.content.Intent.EXTRA_TEXT,
                     "MathIME 診斷文字及模型輸入圖片（512×256）\n\n" + log.readText().takeLast(45000))
                 putParcelableArrayListExtra(android.content.Intent.EXTRA_STREAM, uris)
@@ -432,7 +432,9 @@ class MathKeyboardService : InputMethodService() {
                     OnnxMathRecognizer.Candidate(it.latex, 0.0, "單字元幾何辨識（${(it.confidence*100).toInt()}% 規則分數）")
                 }
                 candidateResults = if (geometryCandidate != null) {
-                    listOf(geometryCandidate) + modelCandidates.filterNot { it.latex.trim() == geometryCandidate.latex.trim() }
+                    (listOf(geometryCandidate) + modelCandidates.filterNot {
+                        it.latex.replace(" ", "") == geometryCandidate.latex.replace(" ", "")
+                    }).take(9)
                 } else modelCandidates
                 candidateIndex = 0
                 refreshCandidateButtons()
