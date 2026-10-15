@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PointF
 import android.graphics.RectF
 import android.view.MotionEvent
 import android.view.View
@@ -13,6 +14,7 @@ import kotlin.math.max
 
 class HandwritingView(context: Context) : View(context) {
     private val paths = mutableListOf<Path>()
+    private val strokes = mutableListOf<MutableList<PointF>>()
     private var active: Path? = null
     var onStrokeFinished: (() -> Unit)? = null
     private val pen = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -32,17 +34,23 @@ class HandwritingView(context: Context) : View(context) {
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
                 active = Path().also { it.moveTo(event.x, event.y); paths.add(it) }
+                strokes.add(mutableListOf(PointF(event.x, event.y)))
                 invalidate(); return true
             }
             MotionEvent.ACTION_MOVE -> {
                 active?.let { path ->
-                    for (i in 0 until event.historySize) path.lineTo(event.getHistoricalX(i), event.getHistoricalY(i))
+                    for (i in 0 until event.historySize) {
+                        val x = event.getHistoricalX(i); val y = event.getHistoricalY(i)
+                        path.lineTo(x, y); strokes.lastOrNull()?.add(PointF(x, y))
+                    }
                     path.lineTo(event.x, event.y)
+                    strokes.lastOrNull()?.add(PointF(event.x, event.y))
                 }
                 invalidate(); return true
             }
             MotionEvent.ACTION_UP -> {
                 active?.lineTo(event.x, event.y)
+                strokes.lastOrNull()?.add(PointF(event.x, event.y))
                 active = null
                 invalidate()
                 onStrokeFinished?.invoke()
@@ -52,8 +60,9 @@ class HandwritingView(context: Context) : View(context) {
         }
         return true
     }
-    fun undo() { if (paths.isNotEmpty()) paths.removeAt(paths.lastIndex); invalidate() }
-    fun clear() { paths.clear(); invalidate() }
+    fun undo() { if (paths.isNotEmpty()) { paths.removeAt(paths.lastIndex); strokes.removeAt(strokes.lastIndex) }; invalidate() }
+    fun clear() { paths.clear(); strokes.clear(); invalidate() }
+    fun getStrokes(): List<List<PointF>> = strokes.map { stroke -> stroke.map { PointF(it.x, it.y) } }
     fun hasInk() = paths.isNotEmpty()
 
     /** Cropped white-background bitmap, with padding, suitable for future model input. */
