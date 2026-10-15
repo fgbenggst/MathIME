@@ -49,11 +49,18 @@ class OnnxMathRecognizer(private val context: Context) {
     fun recognizeVariants(variants: List<Pair<String, Bitmap>>, callback: (Result<String>) -> Unit) {
         worker.execute {
             diagnostics.setLength(0)
-            record("MathIME v1.0.5 finger handwriting multi-variant diagnostics")
+            record("MathIME v1.0.6 candidate diagnostics")
             val result = runCatching {
                 val combined = mutableListOf<Candidate>()
                 val failures = mutableListOf<String>()
-                for ((name, bitmap) in variants) {
+                for ((variantIndex, pair) in variants.withIndex()) {
+                    val (name, bitmap) = pair
+                    runCatching {
+                        File(context.filesDir, "mathime_input_variant_${variantIndex}.png").outputStream().use {
+                            bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+                        }
+                    }.onFailure { record("Variant PNG save error: ${it.message}") }
+                    record("Saved input variant $variantIndex to internal files: mathime_input_variant_${variantIndex}.png")
                     record("=== variant: $name ===")
                     try {
                         infer(bitmap)
@@ -65,7 +72,7 @@ class OnnxMathRecognizer(private val context: Context) {
                         record("Variant failed: $name ${e.stackTraceToString()}")
                     }
                 }
-                lastCandidates = combined.distinctBy { it.latex.replace(" ", "") }.take(9)
+                lastCandidates = rankAcrossVariants(combined).take(9)
                 record("Merged candidates: ${lastCandidates.size}; failures=$failures")
                 lastCandidates.firstOrNull()?.latex ?: error("辨識失敗：${failures.joinToString()}")
             }
@@ -183,8 +190,8 @@ class OnnxMathRecognizer(private val context: Context) {
                     // Beam search: rank complete sequences by accumulated log probability.
                     // All candidates come from the real decoder; no hard-coded formula substitution.
                     data class Beam(val ids: List<Long>, val logp: Double, val ended: Boolean)
-                    val width = 5 // internal beams; show up to three valid candidates
-                    val maxTokens = 80
+                    val width = 9 // wider beam pool; select structurally valid alternatives
+                    val maxTokens = 64
                     var beams = listOf(Beam(listOf(1L), 0.0, false))
                     for (step in 0 until maxTokens) {
                         val expanded = ArrayList<Beam>()
@@ -238,12 +245,42 @@ class OnnxMathRecognizer(private val context: Context) {
                         .filter { it.first.isNotBlank() }
                         .sortedByDescending { it.second }
                     lastCandidates = ordered.distinctBy { it.first }
-                        .take(3).map { Candidate(it.first, it.second) }
+                        .take(6).map { Candidate(it.first, it.second) }
                     lastCandidates.forEachIndexed { index, candidate -> record("Candidate ${index + 1}: score=${candidate.score} latex=${candidate.latex}") }
                     return lastCandidates.firstOrNull()?.latex ?: error("模型沒有產生有效公式；請分享診斷檔")
                 }
             }
         }
+    }
+
+    /** Cross-image log probabilities are not calibrated. Rank by local order,
+     * structural validity, and independent variant agreement. No glyph substitutions.
+     * A candidate remains the exact token sequence emitted by the ONNX decoder.
+     */
+    private fun rankAcrossVariants(input: List<Candidate>): List<Candidate> {
+        val normalized = input.groupBy { it.latex.replace(" ", "") }
+        val sources = input.map { it.source }.distinct()
+        val localRanks = sources.associateWith { source ->
+            input.filter { it.source == source }.mapIndexed { index, c ->
+                c.latex.replace(" ", "") to index
+            }.toMap()
+        }
+        return normalized.map { (key, matches) ->
+            val representative = matches.minByOrNull { c ->
+                (localRanks[c.source]?.get(key) ?: 99)
+            }!!
+            val tokens = representative.latex.split(Regex("\\s+")).filter { it.isNotBlank() }
+            val agreement = matches.map { it.source }.distinct().size
+            val localRank = matches.minOf { localRanks[it.source]?.get(key) ?: 99 }
+            val invalidPenalty = structurePenalty(tokens)
+            val tailPenalty = if (tokens.size >= 2 && tokens.last() in setOf("=", "+", "-", "^", "_", "\\frac", "\\sqrt")) 1.0 else 0.0
+            val extraPenalty = if (tokens.size >= 4 && tokens.takeLast(3).distinct().size == 1) 2.0 else 0.0
+            val priority = localRank * 0.28 + invalidPenalty + tailPenalty + extraPenalty - (agreement - 1) * 0.45
+            Triple(representative, priority, agreement)
+        }.sortedWith(compareBy<Triple<Candidate, Double, Int>> { it.second }
+            .thenByDescending { it.third }
+            .thenBy { sources.indexOf(it.first.source) })
+            .map { it.first }
     }
 
     /** True only for immediate repetition of a block of >= 4 tokens.
