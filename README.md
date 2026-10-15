@@ -1,24 +1,13 @@
-# MathIME v0.1 (Android)
+# MathIME v0.5 — Offline ONNX integration (MODEL NOT INCLUDED)
 
-A minimal Android IME prototype for entering math symbols and LaTeX directly into the focused text field (including ChatGPT).
+This is a real ONNX Runtime inference path, not a fake result or template recognizer. **It does not recognize anything until a compatible trained model and matching vocabulary are provided.**
 
-## Current functionality
-- System keyboard based on `InputMethodService`.
-- Handwriting canvas with undo/clear and auto/manual mode toggle.
-- Math symbol keys and editable LaTeX field.
-- Direct insertion using `InputConnection.commitText()`; no clipboard.
+- Android IME, handwriting canvas, undo/clear, math symbol keys, ChatGPT commitText retained.
+- On-device background inference with ONNX Runtime Android; no API key, INTERNET permission, or cloud requests.
+- Required model assets: `app/src/main/assets/math_ctc.onnx` and `tokens.txt`.
+- Exact model contract: float32 input `[1,1,64,512]` grayscale black=1; float32 output `[1,T,V]` CTC logits; blank token ID 0. `tokens.txt` one token per line, V entries. CTC greedy decoding.
+- **No trained model or vocabulary is bundled.** Models such as pix2tex are encoder-decoder architectures and cannot be used with this CTC adapter without writing a different decoder. Handwritten full-formula accuracy is not established.
+- Image is stretched to 512x64; a production model must match preprocessing used during training.
+- Build with the existing GitHub Actions workflow; build has not been verified here.
 
-**Important limitation:** Mathematical handwriting recognition is **not implemented**. The canvas records strokes, but cannot yet turn them into LaTeX. Auto/manual mode currently controls when a placeholder status appears. The preview is an editable plain-text field, not rendered math. Do not confuse this prototype with a finished handwriting recognition app.
-
-## Build on GitHub (no local Android Studio needed)
-1. Create a new GitHub repository.
-2. Upload the **contents** of this folder to the repository root (including `.github/workflows/android.yml`).
-3. Open the repository's **Actions** tab → **Build MathIME APK** → **Run workflow** (or push to main).
-4. After the job succeeds, open the run and download the `MathIME-debug-apk` artifact.
-5. Unzip the artifact, install `app-debug.apk` on Android, enable MathIME under system keyboard settings, and select it as the current keyboard.
-
-## Next engineering milestone
-Integrate an on-device handwritten mathematical expression recognition model that accepts multi-stroke 2D ink and outputs structured LaTeX; test accuracy and inference latency on actual Android hardware. A regular text OCR model will not reliably capture fractions, indices, matrices, or integral limits.
-
-## Security
-The keyboard requests no Internet permission and sends no strokes to a server. Android may display a generic warning when enabling third-party keyboards. Do not use this experimental keyboard to enter passwords or sensitive information.
+For a usable full-formula offline recognizer, next obtain an appropriately licensed HMER model with weights, identify its exact architecture and preprocessing, and implement the corresponding ONNX export and decoder. Do not mistake this adapter for a completed recognizer.
