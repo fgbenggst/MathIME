@@ -20,3 +20,12 @@
 
 ## v0.9.5 — 遮罩修正
 - 修正 Encoder 遮罩語意，恢復有效推論。
+
+## v1.0.3 — 2026-10-15
+- Move previous/next recognition candidate buttons to the sides of the formula preview.
+- Collapse the LaTeX editor by default; open it with the edit button.
+- Fix preview status so it clears after MathJax finishes rendering.
+- Hide MathJax assistive MathML to avoid double visual rendering on WebView implementations.
+- Add a conservative repeated-token-block penalty in beam search to reduce decoding loops; does not guarantee improved recognition.
+- Preserve CoMER ONNX weights, all-false pixel mask, handwriting, shortcuts and offline rendering.
+- Bump Android versionCode to 23 and versionName to 1.0.3.

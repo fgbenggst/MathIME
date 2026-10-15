@@ -11,6 +11,8 @@ import android.view.inputmethod.InputMethodManager
 import android.os.Build
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.view.Gravity
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.webkit.WebView
@@ -34,6 +36,11 @@ class MathKeyboardService : InputMethodService() {
     private var previewReady = false
     private var previewLatex = ""
     private lateinit var previewState: TextView
+    private lateinit var candidateLabel: TextView
+    private lateinit var prevButton: Button
+    private lateinit var nextButton: Button
+    private lateinit var editorToggle: Button
+    private var editorVisible = false
     private val pending = Runnable { recognize() }
     private var deleteRepeating = false
     private var holdRunnable: Runnable? = null
@@ -55,12 +62,46 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME 1.0｜離線公式預覽 + CoMER"
-            textSize = 13f
+            text = "MathIME v1.0.3 · 手動辨識"
+            textSize = 12f
+            setTextColor(Color.rgb(60, 70, 86))
         }
         root.addView(status)
-        val previewLabel = TextView(this).apply { text = "公式預覽（離線）"; textSize = 13f }
-        root.addView(previewLabel)
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(this).apply {
+            text = "公式預覽 · 離線"
+            textSize = 14f
+            setTextColor(Color.rgb(32, 48, 72))
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        candidateLabel = TextView(this).apply { text = "候選 0/0"; textSize = 12f }
+        header.addView(candidateLabel)
+        editorToggle = Button(this).apply {
+            text = "✎ 編輯"; textSize = 11f; isAllCaps = false
+            setOnClickListener {
+                editorVisible = !editorVisible
+                formula.visibility = if (editorVisible) View.VISIBLE else View.GONE
+                text = if (editorVisible) "收合" else "✎ 編輯"
+            }
+        }
+        header.addView(editorToggle)
+        root.addView(header)
+        val previewRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.WHITE)
+        }
+        prevButton = Button(this).apply {
+            text = "◀"; textSize = 14f; isAllCaps = false
+            setOnClickListener { selectCandidate(-1) }
+        }
+        nextButton = Button(this).apply {
+            text = "▶"; textSize = 14f; isAllCaps = false
+            setOnClickListener { selectCandidate(1) }
+        }
+        previewRow.addView(prevButton, LinearLayout.LayoutParams((density * 52).toInt(), (density * 72).toInt()))
         previewReady = false
         preview = WebView(this).apply {
             setBackgroundColor(Color.WHITE)
@@ -73,20 +114,23 @@ class MathKeyboardService : InputMethodService() {
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     previewReady = true
-                    previewState.text = "預覽引擎載入中…"
                     updatePreview(previewLatex)
+                    refreshPreviewState()
                 }
             }
             loadUrl("file:///android_asset/preview.html")
         }
-        root.addView(preview, LinearLayout.LayoutParams(-1, (density * 90).toInt()))
-        previewState = TextView(this).apply { text = "預覽載入中…"; textSize = 11f }
+        previewRow.addView(preview, LinearLayout.LayoutParams(0, (density * 86).toInt(), 1f))
+        previewRow.addView(nextButton, LinearLayout.LayoutParams((density * 52).toInt(), (density * 72).toInt()))
+        root.addView(previewRow)
+        previewState = TextView(this).apply { text = "預覽引擎載入中…"; textSize = 11f }
         root.addView(previewState)
         formula = EditText(this).apply {
             hint = "LaTeX 輸入／修正區"
-            textSize = 16f
+            textSize = 15f
             setSingleLine(true)
             showSoftInputOnFocus = false
+            visibility = View.GONE
         }
         root.addView(formula)
         formula.addTextChangedListener(object : TextWatcher {
@@ -96,6 +140,7 @@ class MathKeyboardService : InputMethodService() {
             }
             override fun afterTextChanged(s: Editable?) {}
         })
+        refreshCandidateButtons()
         ink = HandwritingView(this).apply {
             layoutParams = LinearLayout.LayoutParams(-1, (density * 175).toInt())
             onStrokeFinished = {
@@ -157,7 +202,7 @@ class MathKeyboardService : InputMethodService() {
                 "自動/手動" -> {
                     auto = !auto
                     handler.removeCallbacks(pending)
-                    status.text = if (auto) "即時辨識：停筆 0.8 秒" else "手動辨識：按辨識觸發"
+                    status.text = if (auto) "MathIME v1.0.3 · 自動辨識" else "MathIME v1.0.3 · 手動辨識"
                 }
                 "輸入" -> {
                     val s = formula.text.toString()
@@ -172,10 +217,9 @@ class MathKeyboardService : InputMethodService() {
                 }
             }
         }
-        row("下一候選", "清空全部", "診斷分享", "🌐") { label ->
+        row("清空全部", "診斷分享", "🌐") { label ->
             when (label) {
-                "下一候選" -> nextCandidate()
-                "清空全部" -> { clearHandwriting(); formula.setText(""); candidateResults = emptyList(); status.text = "已清空筆跡與公式" }
+                "清空全部" -> { clearHandwriting(); formula.setText(""); candidateResults = emptyList(); candidateIndex = 0; refreshCandidateButtons(); status.text = "已清空筆跡與公式" }
                 "診斷分享" -> shareDiagnostics()
                 "🌐" -> switchKeyboard()
             }
@@ -190,13 +234,35 @@ class MathKeyboardService : InputMethodService() {
         status.text = "已清除筆跡，保留公式"
     }
 
-    private fun nextCandidate() {
-        if (candidateResults.isEmpty()) { status.text = "尚無候選公式"; return }
-        candidateIndex = (candidateIndex + 1) % candidateResults.size
+    private fun refreshCandidateButtons() {
+        if (!::candidateLabel.isInitialized) return
+        candidateLabel.text = "候選 ${if (candidateResults.isEmpty()) 0 else candidateIndex + 1}/${candidateResults.size}"
+        prevButton.isEnabled = candidateResults.size > 1
+        nextButton.isEnabled = candidateResults.size > 1
+        prevButton.alpha = if (prevButton.isEnabled) 1f else .35f
+        nextButton.alpha = if (nextButton.isEnabled) 1f else .35f
+    }
+
+    private fun selectCandidate(delta: Int) {
+        if (candidateResults.size <= 1) return
+        candidateIndex = (candidateIndex + delta + candidateResults.size) % candidateResults.size
         val latex = candidateResults[candidateIndex].latex
         formula.setText(latex)
         formula.setSelection(latex.length)
-        status.text = "候選 ${candidateIndex + 1}/${candidateResults.size}，請核對"
+        refreshCandidateButtons()
+        status.text = "候選 ${candidateIndex + 1}/${candidateResults.size}，請核對預覽"
+    }
+
+    private fun refreshPreviewState() {
+        if (!previewReady || !::preview.isInitialized) return
+        preview.evaluateJavascript("window.previewStatus ? window.previewStatus() : 'loading'", { value ->
+            if (!::previewState.isInitialized) return@evaluateJavascript
+            previewState.text = when (value?.trim('"')) {
+                "ok", "ready" -> ""
+                "error" -> "公式預覽失敗，請展開編輯或分享診斷"
+                else -> "預覽引擎載入中…"
+            }
+        })
     }
 
     private fun switchKeyboard() {
@@ -221,11 +287,7 @@ class MathKeyboardService : InputMethodService() {
         if (!previewReady || !::preview.isInitialized) return
         val json = org.json.JSONObject.quote(latex)
         preview.evaluateJavascript("render($json);", null)
-        // JavaScript reports whether MathJax really rendered, not just whether the page loaded.
-        preview.evaluateJavascript("window.previewStatus ? window.previewStatus() : 'waiting'", { result ->
-            if (::previewState.isInitialized && result != null && result.contains("error"))
-                previewState.text = "預覽異常，請檢查公式或重新開啟鍵盤"
-        })
+        handler.postDelayed({ if (::preview.isInitialized) refreshPreviewState() }, 350L)
     }
 
     /** Deletes in the ChatGPT/app text field, not the handwritten canvas.
@@ -310,6 +372,7 @@ class MathKeyboardService : InputMethodService() {
             result.onSuccess { latex ->
                 candidateResults = engine.candidates()
                 candidateIndex = 0
+                refreshCandidateButtons()
                 formula.setText(latex)
                 formula.setSelection(latex.length)
                 status.text = "候選 1/${candidateResults.size}，請核對公式預覽"

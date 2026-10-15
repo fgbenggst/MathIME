@@ -45,7 +45,7 @@ class OnnxMathRecognizer(private val context: Context) {
     fun recognize(bitmap: Bitmap, callback: (Result<String>) -> Unit) {
         worker.execute {
             diagnostics.setLength(0)
-            record("MathIME v0.9.6 beam search diagnostics")
+            record("MathIME v1.0.3 beam search diagnostics")
             val result = runCatching { infer(bitmap) }
             result.onFailure { record("ERROR: ${it.stackTraceToString()}") }
             runCatching { saveDiagnostics() }
@@ -181,7 +181,12 @@ class OnnxMathRecognizer(private val context: Context) {
                                     }
                                     for (id in best) {
                                         if (id == 0 || id == 1) continue // disallow PAD/SOS
-                                        expanded.add(Beam(beam.ids + id.toLong(), beam.logp + logits[id].toDouble() - logNorm, id == 2))
+                                        val nextIds = beam.ids + id.toLong()
+                                        // Discourage decoder loops that repeat a complete multi-token
+                                        // segment twice (e.g. identical radicals). Do not ban repetition:
+                                        // legitimate expressions may contain the same factor twice.
+                                        val loopPenalty = if (id != 2 && repeatsTailBlock(nextIds)) 1.8 else 0.0
+                                        expanded.add(Beam(nextIds, beam.logp + logits[id].toDouble() - logNorm - loopPenalty, id == 2))
                                     }
                                 }
                             }
@@ -205,6 +210,18 @@ class OnnxMathRecognizer(private val context: Context) {
                 }
             }
         }
+    }
+
+    /** True only for immediate repetition of a block of >= 4 tokens.
+     * This is a soft beam-ranking penalty, never a forced rewrite of LaTeX.
+     */
+    private fun repeatsTailBlock(ids: List<Long>): Boolean {
+        val tokens = ids.drop(1)
+        for (length in 4..minOf(20, tokens.size / 2)) {
+            val n = tokens.size
+            if (tokens.subList(n - 2 * length, n - length) == tokens.subList(n - length, n)) return true
+        }
+        return false
     }
 
     fun close() {
