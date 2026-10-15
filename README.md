@@ -1,8 +1,18 @@
-# MathIME v0.6.1 — 刪除鍵修正版
+# MathIME v0.7.0-dev — 完整 Android 專案原始碼
 
-以 v0.6 離線原型為基礎，新增 ⌫ 刪除鍵：短按刪除游標前一個 Unicode 字元，長按約 450ms 後連續刪除；若 LaTeX 編輯欄有焦點，刪除編輯欄內容，否則刪除 ChatGPT 等目標 App 輸入框文字。支援刪除選取文字。🌐 移至最下排，保留原有功能。
+本版本保留已實測的手寫鍵盤、數學符號、刪除鍵、LaTeX 編輯與 ChatGPT 輸入。
 
-**限制：** 仍未包含訓練完成的完整數學公式辨識 ONNX 模型；不能將此版視為高精度公式辨識完成版。尚未實際執行 Android 編譯或手機測試。
+**重要：尚未提供訓練完成且符合本專案規格的完整公式辨識模型。**
+此 ZIP 是可供編譯的完整 Android 原始碼專案，不是已完成的高精度手寫數學辨識產品。
 
-## 編譯
-上傳本專案到 GitHub 儲存庫根目錄，使用 `.github/workflows/main.yml` 的 Actions 編譯 Debug APK。
+## 使用方式
+1. 將 ZIP 內容放進 GitHub 專案根目錄。
+2. 使用 `.github/workflows/main.yml` 編譯。
+3. 安裝 APK 後啟用 MathIME。
+4. 點「模型狀態」查看模型檔案是否存在。
+
+## 模型介面（僅支援特定 CTC 架構）
+請參考 `MODEL_INTEGRATION.md`。不能把任意 pix2tex/CoMER 權重改名成 math_ctc.onnx 使用。
+
+## 驗證狀態
+此版本尚未在 GitHub Actions 或 Android 實機編譯測試。

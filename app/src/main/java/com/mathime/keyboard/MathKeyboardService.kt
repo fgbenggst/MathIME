@@ -44,7 +44,7 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME 0.6｜離線單符號辨識；完整公式需模型"
+            text = "MathIME 0.7 開發版｜離線辨識；完整公式模型尚未提供"
             textSize = 13f
         }
         root.addView(status)
@@ -136,7 +136,7 @@ class MathKeyboardService : InputMethodService() {
                 }
             }
         }
-        row("重新書寫", "完全離線 ✓", "🌐") { label ->
+        row("重新書寫", "模型狀態", "🌐") { label ->
             if (label == "重新書寫") {
                 handler.removeCallbacks(pending)
                 ink.clear()
@@ -144,7 +144,7 @@ class MathKeyboardService : InputMethodService() {
             } else if (label == "🌐") {
                 val switched = try { switchToNextInputMethod(false) } catch (_: Exception) { false }
                 if (!switched) (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
-            } else status.text = "完全離線：不使用 API、不上傳筆跡"
+            } else status.text = if (hasModelFiles()) "已找到模型檔案；相容性需實際辨識驗證" else "缺少 math_ctc.onnx / tokens.txt；僅能嘗試單符號"
         }
         return root
     }
@@ -186,14 +186,18 @@ class MathKeyboardService : InputMethodService() {
         formula.text.insert(cursor, s)
     }
 
+    private fun hasModelFiles(): Boolean = try {
+        assets.open("math_ctc.onnx").close()
+        assets.open("tokens.txt").close()
+        true
+    } catch (_: java.io.IOException) { false }
+
     private fun recognize() {
         if (recognizing) return
         if (!ink.hasInk()) { status.text = "請先在白色區域書寫"; return }
         // An actual pretrained model may be supplied later. Until then use an honest,
         // deliberately limited single-stroke recognizer rather than fabricated LaTeX.
-        val hasModel = try {
-            assets.open("math_ctc.onnx").use { true }
-        } catch (_: java.io.IOException) { false }
+        val hasModel = hasModelFiles()
         if (!hasModel) {
             val strokes = ink.getStrokes()
             val guess = symbolRecognizer.recognize(strokes)
