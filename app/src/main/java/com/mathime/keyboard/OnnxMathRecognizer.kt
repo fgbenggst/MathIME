@@ -40,6 +40,8 @@ class OnnxMathRecognizer(private val context: Context) {
 
     data class Candidate(val latex: String, val score: Double, val source: String = "原始筆跡")
     private var activeVariantIndex = 0
+    @Volatile private var precisionMode = false
+    fun setPrecisionMode(enabled: Boolean) { precisionMode = enabled }
     private var lastCandidates: List<Candidate> = emptyList()
     fun candidates(): List<Candidate> = lastCandidates.toList()
 
@@ -50,11 +52,13 @@ class OnnxMathRecognizer(private val context: Context) {
     fun recognizeVariants(variants: List<Pair<String, Bitmap>>, callback: (Result<String>) -> Unit) {
         worker.execute {
             diagnostics.setLength(0)
-            record("MathIME v1.0.7 candidate diagnostics")
+            record("MathIME v1.0.8 diagnostics; mode=${if (precisionMode) "precise" else "fast"}")
+            val totalStart = android.os.SystemClock.elapsedRealtime()
             val result = runCatching {
                 val combined = mutableListOf<Candidate>()
                 val failures = mutableListOf<String>()
                 for ((variantIndex, pair) in variants.withIndex()) {
+                    val variantStart = android.os.SystemClock.elapsedRealtime()
                     val (name, bitmap) = pair
                     runCatching {
                         File(context.filesDir, "mathime_input_variant_${variantIndex}.png").outputStream().use {
@@ -66,6 +70,7 @@ class OnnxMathRecognizer(private val context: Context) {
                     try {
                         activeVariantIndex = variantIndex
                         infer(bitmap)
+                        record("Variant elapsedMs=${android.os.SystemClock.elapsedRealtime() - variantStart}")
                         val candidatesForVariant = lastCandidates.toList()
                         record("Variant $name: ${candidatesForVariant.joinToString { it.latex }}")
                         combined.addAll(candidatesForVariant.map { it.copy(source = name) })
@@ -74,7 +79,8 @@ class OnnxMathRecognizer(private val context: Context) {
                         record("Variant failed: $name ${e.stackTraceToString()}")
                     }
                 }
-                lastCandidates = rankAcrossVariants(combined).take(9)
+                lastCandidates = rankAcrossVariants(combined).take(if (precisionMode) 9 else 3)
+                record("Total elapsedMs=${android.os.SystemClock.elapsedRealtime() - totalStart}")
                 record("Merged candidates: ${lastCandidates.size}; failures=$failures")
                 lastCandidates.firstOrNull()?.latex ?: error("辨識失敗：${failures.joinToString()}")
             }
@@ -104,7 +110,9 @@ class OnnxMathRecognizer(private val context: Context) {
     }
 
     private fun infer(bitmap: Bitmap): String {
+        val initializeStart = android.os.SystemClock.elapsedRealtime()
         initialize()
+        record("Model initialization elapsedMs=${android.os.SystemClock.elapsedRealtime() - initializeStart}")
         val enc = checkNotNull(encoder)
         val dec = checkNotNull(decoder)
         val vocab = checkNotNull(words)
@@ -209,8 +217,9 @@ class OnnxMathRecognizer(private val context: Context) {
                     // Beam search: rank complete sequences by accumulated log probability.
                     // All candidates come from the real decoder; no hard-coded formula substitution.
                     data class Beam(val ids: List<Long>, val logp: Double, val ended: Boolean)
-                    val width = 9 // wider beam pool; select structurally valid alternatives
-                    val maxTokens = 64
+                    val width = if (precisionMode) 9 else 3
+                    val maxTokens = if (precisionMode) 64 else 36
+                    val decodeStart = android.os.SystemClock.elapsedRealtime()
                     var beams = listOf(Beam(listOf(1L), 0.0, false))
                     val completed = ArrayList<Beam>()
                     for (step in 0 until maxTokens) {
@@ -250,7 +259,14 @@ class OnnxMathRecognizer(private val context: Context) {
                         // Keep a short, diverse list; normalization is only used for final ranking.
                         beams = expanded.sortedByDescending { it.logp }.distinctBy { it.ids }.take(width)
                         if (beams.isEmpty()) break
+                        // Future log-probability increments cannot exceed zero.
+                        // Conservative early exit once three complete sequences dominate.
+                        if (!precisionMode && completed.size >= 3 && step >= 5) {
+                            val third = completed.sortedByDescending { it.logp }.getOrNull(2)?.logp ?: Double.NEGATIVE_INFINITY
+                            if (beams.first().logp < third - 1.5) break
+                        }
                     }
+                    record("Decoder elapsedMs=${android.os.SystemClock.elapsedRealtime() - decodeStart}")
                     val finished = completed.distinctBy { it.ids }
                     record("Beam finished hypotheses retained=${finished.size}, active=${beams.size}")
                     if (finished.isEmpty()) record("WARNING: no EOS among final beams")
@@ -267,7 +283,7 @@ class OnnxMathRecognizer(private val context: Context) {
                         .filter { it.first.isNotBlank() }
                         .sortedByDescending { it.second }
                     lastCandidates = ordered.distinctBy { it.first }
-                        .take(6).map { Candidate(it.first, it.second) }
+                        .take(if (precisionMode) 6 else 3).map { Candidate(it.first, it.second) }
                     lastCandidates.forEachIndexed { index, candidate -> record("Candidate ${index + 1}: score=${candidate.score} latex=${candidate.latex}") }
                     return lastCandidates.firstOrNull()?.latex ?: error("模型沒有產生有效公式；請分享診斷檔")
                 }

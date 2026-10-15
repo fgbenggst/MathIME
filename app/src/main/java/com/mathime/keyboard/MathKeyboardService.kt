@@ -27,6 +27,7 @@ class MathKeyboardService : InputMethodService() {
     private var recognizer: OnnxMathRecognizer? = null
     private val symbolRecognizer = StrokeRecognizer()
     private var recognizing = false
+    private var nextPrecise = false
     private var candidateIndex = 0
     private var candidateResults: List<OnnxMathRecognizer.Candidate> = emptyList()
     private lateinit var ink: HandwritingView
@@ -62,7 +63,7 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME v1.0.5 · 手動辨識"
+            text = "MathIME v1.0.8 · 手動辨識"
             textSize = 12f
             setTextColor(Color.rgb(60, 70, 86))
         }
@@ -202,7 +203,7 @@ class MathKeyboardService : InputMethodService() {
                 "自動/手動" -> {
                     auto = !auto
                     handler.removeCallbacks(pending)
-                    status.text = if (auto) "MathIME v1.0.5 · 自動辨識" else "MathIME v1.0.5 · 手動辨識"
+                    status.text = if (auto) "MathIME v1.0.8 · 自動辨識" else "MathIME v1.0.8 · 手動辨識"
                 }
                 "輸入" -> {
                     val s = formula.text.toString()
@@ -217,8 +218,9 @@ class MathKeyboardService : InputMethodService() {
                 }
             }
         }
-        row("清空全部", "診斷分享", "🌐") { label ->
+        row("精準辨識", "清空全部", "診斷分享", "🌐") { label ->
             when (label) {
+                "精準辨識" -> { nextPrecise = true; recognize() }
                 "清空全部" -> { clearHandwriting(); formula.setText(""); candidateResults = emptyList(); candidateIndex = 0; refreshCandidateButtons(); status.text = "已清空筆跡與公式" }
                 "診斷分享" -> shareDiagnostics()
                 "🌐" -> switchKeyboard()
@@ -355,10 +357,13 @@ class MathKeyboardService : InputMethodService() {
             }
             return
         }
-        val variants = ink.exportVariants()
+        val precise = nextPrecise
+        nextPrecise = false
+        val variants = if (precise) ink.exportVariants() else listOfNotNull(ink.exportInkBitmap()?.let { "原始筆跡" to it })
         if (variants.isEmpty()) { status.text = "沒有可辨識的筆跡"; return }
         recognizing = true
-        status.text = "正在本地模型辨識…"
+        val startMs = android.os.SystemClock.elapsedRealtime()
+        status.text = if (precise) "正在精準辨識…" else "正在快速辨識…"
         val engine = try {
             recognizer ?: OnnxMathRecognizer(applicationContext).also { recognizer = it }
         } catch (e: Throwable) {
@@ -367,7 +372,9 @@ class MathKeyboardService : InputMethodService() {
             status.text = "辨識引擎無法啟動：${e.message ?: e.javaClass.simpleName}"
             return
         }
+        engine.setPrecisionMode(precise)
         engine.recognizeVariants(variants) { result ->
+            val elapsed = android.os.SystemClock.elapsedRealtime() - startMs
             recognizing = false
             result.onSuccess { latex ->
                 candidateResults = engine.candidates()
@@ -375,7 +382,7 @@ class MathKeyboardService : InputMethodService() {
                 refreshCandidateButtons()
                 formula.setText(latex)
                 formula.setSelection(latex.length)
-                status.text = "候選 1/${candidateResults.size} · ${candidateResults.firstOrNull()?.source ?: ""}，請核對預覽"
+                status.text = "候選 1/${candidateResults.size} · ${candidateResults.firstOrNull()?.source ?: ""}，耗時 ${elapsed}ms，請核對預覽"
             }.onFailure { error ->
                 status.text = error.message ?: "辨識失敗；筆跡已保留"
             }
