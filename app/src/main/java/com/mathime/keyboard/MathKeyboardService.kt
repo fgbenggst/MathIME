@@ -13,17 +13,27 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.text.TextWatcher
+import android.text.Editable
 
-/** Offline-only keyboard. The recognizer is a small template baseline, NOT full formula OCR. */
+/** Offline math IME: CoMER recognition, candidate selection and formula preview. */
 class MathKeyboardService : InputMethodService() {
     private val handler = Handler(Looper.getMainLooper())
     private var auto = false
     private var recognizer: OnnxMathRecognizer? = null
     private val symbolRecognizer = StrokeRecognizer()
     private var recognizing = false
+    private var candidateIndex = 0
+    private var candidateResults: List<OnnxMathRecognizer.Candidate> = emptyList()
     private lateinit var ink: HandwritingView
     private lateinit var formula: EditText
     private lateinit var status: TextView
+    private lateinit var preview: WebView
+    private var previewReady = false
+    private var previewLatex = ""
+    private lateinit var previewState: TextView
     private val pending = Runnable { recognize() }
     private var deleteRepeating = false
     private var holdRunnable: Runnable? = null
@@ -45,10 +55,33 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME 0.9.5｜CoMER 遮罩診斷版"
+            text = "MathIME 1.0｜離線公式預覽 + CoMER"
             textSize = 13f
         }
         root.addView(status)
+        val previewLabel = TextView(this).apply { text = "公式預覽（離線）"; textSize = 13f }
+        root.addView(previewLabel)
+        previewReady = false
+        preview = WebView(this).apply {
+            setBackgroundColor(Color.WHITE)
+            settings.javaScriptEnabled = true
+            settings.allowFileAccess = true
+            settings.allowContentAccess = false
+            settings.domStorageEnabled = false
+            settings.setSupportZoom(false)
+            isVerticalScrollBarEnabled = false
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    previewReady = true
+                    previewState.text = "預覽引擎載入中…"
+                    updatePreview(previewLatex)
+                }
+            }
+            loadUrl("file:///android_asset/preview.html")
+        }
+        root.addView(preview, LinearLayout.LayoutParams(-1, (density * 90).toInt()))
+        previewState = TextView(this).apply { text = "預覽載入中…"; textSize = 11f }
+        root.addView(previewState)
         formula = EditText(this).apply {
             hint = "LaTeX 輸入／修正區"
             textSize = 16f
@@ -56,6 +89,13 @@ class MathKeyboardService : InputMethodService() {
             showSoftInputOnFocus = false
         }
         root.addView(formula)
+        formula.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                updatePreview(s?.toString().orEmpty())
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
         ink = HandwritingView(this).apply {
             layoutParams = LinearLayout.LayoutParams(-1, (density * 175).toInt())
             onStrokeFinished = {
@@ -109,12 +149,12 @@ class MathKeyboardService : InputMethodService() {
         }
         row("∫", "∂", "∞", "Σ", "√", "π") { addSymbol(it) }
         row("^", "_", "\\frac{}{}", "\\lim_{}", "dx", "=") { addSymbol(it) }
-        row("辨識", "復原", "清除", "手動", "輸入", "⌫") { label ->
+        row("辨識", "復原", "重寫", "自動/手動", "輸入", "⌫") { label ->
             when (label) {
                 "辨識" -> recognize()
                 "復原" -> { handler.removeCallbacks(pending); ink.undo(); status.text = "已復原上一筆" }
-                "清除" -> { handler.removeCallbacks(pending); ink.clear(); formula.setText(""); status.text = "已清除" }
-                "手動" -> {
+                "重寫" -> clearHandwriting()
+                "自動/手動" -> {
                     auto = !auto
                     handler.removeCallbacks(pending)
                     status.text = if (auto) "即時辨識：停筆 0.8 秒" else "手動辨識：按辨識觸發"
@@ -130,37 +170,62 @@ class MathKeyboardService : InputMethodService() {
                     if (!deleteTriggeredByHold) deleteCharacter()
                     deleteTriggeredByHold = false
                 }
-                "🌐" -> {
-                    // Ask Android to switch to the next enabled IME; picker is a fallback.
-                    val switched = try { switchToNextInputMethod(false) } catch (_: Exception) { false }
-                    if (!switched) {
-                        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
-                    }
-                }
             }
         }
-        row("重新書寫", "診斷分享", "🌐") { label ->
-            if (label == "重新書寫") {
-                handler.removeCallbacks(pending)
-                ink.clear()
-                status.text = "筆跡已清除，LaTeX 保留"
-            } else if (label == "🌐") {
-                val switched = try { switchToNextInputMethod(false) } catch (_: Exception) { false }
-                if (!switched) (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
-            } else if (label == "診斷分享") {
-                val file = recognizer?.diagnosticFile()
-                if (file != null && file.exists()) {
-                    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(android.content.Intent.EXTRA_SUBJECT, "MathIME CoMER diagnostics")
-                        putExtra(android.content.Intent.EXTRA_TEXT, file.readText().takeLast(45000))
-                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    startActivity(android.content.Intent.createChooser(intent, "分享辨識診斷").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-                } else status.text = "請先執行一次辨識，再分享診斷"
+        row("下一候選", "清空全部", "診斷分享", "🌐") { label ->
+            when (label) {
+                "下一候選" -> nextCandidate()
+                "清空全部" -> { clearHandwriting(); formula.setText(""); candidateResults = emptyList(); status.text = "已清空筆跡與公式" }
+                "診斷分享" -> shareDiagnostics()
+                "🌐" -> switchKeyboard()
             }
         }
         return root
+    }
+
+
+    private fun clearHandwriting() {
+        handler.removeCallbacks(pending)
+        ink.clear()
+        status.text = "已清除筆跡，保留公式"
+    }
+
+    private fun nextCandidate() {
+        if (candidateResults.isEmpty()) { status.text = "尚無候選公式"; return }
+        candidateIndex = (candidateIndex + 1) % candidateResults.size
+        val latex = candidateResults[candidateIndex].latex
+        formula.setText(latex)
+        formula.setSelection(latex.length)
+        status.text = "候選 ${candidateIndex + 1}/${candidateResults.size}，請核對"
+    }
+
+    private fun switchKeyboard() {
+        val switched = try { switchToNextInputMethod(false) } catch (_: Exception) { false }
+        if (!switched) (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
+    }
+
+    private fun shareDiagnostics() {
+        val file = recognizer?.diagnosticFile()
+        if (file == null || !file.exists()) { status.text = "請先辨識，再分享診斷"; return }
+        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(android.content.Intent.EXTRA_SUBJECT, "MathIME CoMER diagnostics")
+            putExtra(android.content.Intent.EXTRA_TEXT, file.readText().takeLast(45000))
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(android.content.Intent.createChooser(intent, "分享辨識診斷").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    private fun updatePreview(latex: String) {
+        previewLatex = latex
+        if (!previewReady || !::preview.isInitialized) return
+        val json = org.json.JSONObject.quote(latex)
+        preview.evaluateJavascript("render($json);", null)
+        // JavaScript reports whether MathJax really rendered, not just whether the page loaded.
+        preview.evaluateJavascript("window.previewStatus ? window.previewStatus() : 'waiting'", { result ->
+            if (::previewState.isInitialized && result != null && result.contains("error"))
+                previewState.text = "預覽異常，請檢查公式或重新開啟鍵盤"
+        })
     }
 
     /** Deletes in the ChatGPT/app text field, not the handwritten canvas.
@@ -243,9 +308,11 @@ class MathKeyboardService : InputMethodService() {
             recognizing = false
             bitmap.recycle()
             result.onSuccess { latex ->
+                candidateResults = engine.candidates()
+                candidateIndex = 0
                 formula.setText(latex)
                 formula.setSelection(latex.length)
-                status.text = "辨識候選（尚未驗證正確），請核對；可按診斷分享"
+                status.text = "候選 1/${candidateResults.size}，請核對公式預覽"
             }.onFailure { error ->
                 status.text = error.message ?: "辨識失敗；筆跡已保留"
             }
@@ -265,5 +332,5 @@ class MathKeyboardService : InputMethodService() {
         super.onFinishInputView(finishingInput)
     }
 
-    override fun onDestroy() { handler.removeCallbacks(pending); deleteRepeating = false; handler.removeCallbacks(deleteRepeat); holdRunnable?.let(handler::removeCallbacks); recognizer?.close(); super.onDestroy() }
+    override fun onDestroy() { handler.removeCallbacks(pending); deleteRepeating = false; handler.removeCallbacks(deleteRepeat); holdRunnable?.let(handler::removeCallbacks); recognizer?.close(); if (::preview.isInitialized) preview.destroy(); super.onDestroy() }
 }

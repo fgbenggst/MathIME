@@ -19,6 +19,7 @@ import android.util.Log
 import android.os.Handler
 import android.os.Looper
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 /** Actual pretrained CoMER encoder-decoder ONNX inference; never uses hardcoded recognition results. */
@@ -37,10 +38,14 @@ class OnnxMathRecognizer(private val context: Context) {
     fun diagnosticFile(): File = File(context.filesDir, "comer_diagnostics.txt")
     private fun saveDiagnostics() { diagnosticFile().writeText(diagnostics.toString()) }
 
+    data class Candidate(val latex: String, val score: Double)
+    private var lastCandidates: List<Candidate> = emptyList()
+    fun candidates(): List<Candidate> = lastCandidates.toList()
+
     fun recognize(bitmap: Bitmap, callback: (Result<String>) -> Unit) {
         worker.execute {
             diagnostics.setLength(0)
-            record("MathIME v0.9.5 mask and numerical diagnostics")
+            record("MathIME v0.9.6 beam search diagnostics")
             val result = runCatching { infer(bitmap) }
             result.onFailure { record("ERROR: ${it.stackTraceToString()}") }
             runCatching { saveDiagnostics() }
@@ -149,57 +154,54 @@ class OnnxMathRecognizer(private val context: Context) {
                     record("Encoder mask: true(masked)=$masked false(valid)=$valid")
                     check(nanFeatures == 0L && infFeatures == 0L) { "Encoder 輸出含非有限數值；請分享診斷檔" }
                     check(valid > 0L) { "Encoder 遮罩沒有有效像素：全部被遮蔽；請分享診斷檔" }
-                    val ids = ArrayList<Long>(); ids.add(1L) // <sos>
-                    val output = ArrayList<String>()
-                    val trace = ArrayList<String>()
-                    var lastToken = -1
-                    var repeats = 0
-                    for (step in 0 until 160) {
-                        OnnxTensor.createTensor(env, LongBuffer.wrap(ids.toLongArray()), longArrayOf(1, ids.size.toLong())).use { inputIds ->
-                            val decodedResult = try {
-                                dec.run(mapOf("encoder_features" to features, "encoder_mask" to encMask, "input_ids" to inputIds))
-                            } catch (e: Exception) {
-                                throw IllegalStateException(
-                                    "Decoder 第 $step 步失敗；特徵=${featureShape.contentToString()}；tokens=${ids.size}；${e.message}", e
-                                )
-                            }
-                            decodedResult.use { decoded ->
-                                val logits = decoded[0].value as? Array<*> ?: error("Decoder 輸出格式不符")
-                                val sequence = logits[0] as? Array<*> ?: error("Decoder 輸出序列格式不符")
-                                val last = sequence.last() as? FloatArray ?: error("Decoder logits 不是 float32")
-                                if (step < 12) record("Step=$step ids=${ids.joinToString(",")} outputShape=${(decoded[0] as OnnxTensor).info.shape.contentToString()}")
-                                require(last.size == vocab.size) {
-                                    "詞彙表與模型不符：logits=${last.size}，vocab=${vocab.size}"
+                    // Beam search: rank complete sequences by accumulated log probability.
+                    // All candidates come from the real decoder; no hard-coded formula substitution.
+                    data class Beam(val ids: List<Long>, val logp: Double, val ended: Boolean)
+                    val width = 3
+                    val maxTokens = 96
+                    var beams = listOf(Beam(listOf(1L), 0.0, false))
+                    for (step in 0 until maxTokens) {
+                        val expanded = ArrayList<Beam>()
+                        for (beam in beams) {
+                            if (beam.ended) { expanded.add(beam); continue }
+                            OnnxTensor.createTensor(env, LongBuffer.wrap(beam.ids.toLongArray()), longArrayOf(1, beam.ids.size.toLong())).use { inputIds ->
+                                dec.run(mapOf("encoder_features" to features, "encoder_mask" to encMask, "input_ids" to inputIds)).use { decoded ->
+                                    val tensor = decoded[0] as OnnxTensor
+                                    val seq = (tensor.value as Array<*>)[0] as Array<*>
+                                    val logits = seq.last() as FloatArray
+                                    require(logits.size == vocab.size && logits.all { it.isFinite() }) {
+                                        "Decoder logits invalid at step=$step"
+                                    }
+                                    val maxLogit = logits.maxOrNull()!!.toDouble()
+                                    val sumExp = logits.sumOf { kotlin.math.exp(it.toDouble() - maxLogit) }
+                                    val logNorm = maxLogit + kotlin.math.ln(sumExp)
+                                    val best = logits.indices.sortedByDescending { logits[it] }.take(width + 2)
+                                    if (step < 5 && beam === beams.first()) {
+                                        record("Beam step=$step ids=${beam.ids.joinToString(",")} top=" + best.take(5).joinToString(" | ") { "${vocab[it]}:${"%.2f".format(java.util.Locale.US, logits[it])}" })
+                                    }
+                                    for (id in best) {
+                                        if (id == 0 || id == 1) continue // disallow PAD/SOS
+                                        expanded.add(Beam(beam.ids + id.toLong(), beam.logp + logits[id].toDouble() - logNorm, id == 2))
+                                    }
                                 }
-                                val nanCount = last.count { it.isNaN() }
-                                val infCount = last.count { it.isInfinite() }
-                                if (step < 12 || nanCount > 0 || infCount > 0) {
-                                    record("Decoder step=$step logits: finite=${last.size - nanCount - infCount} NaN=$nanCount Inf=$infCount")
-                                }
-                                require(nanCount == 0 && infCount == 0) {
-                                    "Decoder logits 出現 NaN=$nanCount Inf=$infCount，step=$step；請分享診斷檔"
-                                }
-                                val ranked = last.indices.sortedByDescending { last[it] }.take(3)
-                                val next = ranked.firstOrNull() ?: error("空白 logits")
-                                if (step < 12) record("Top5: " + last.indices.sortedByDescending { last[it] }.take(5).joinToString(" | ") { "${it}:${vocab[it]}=${"%.3f".format(java.util.Locale.US, last[it])}" })
-                                if (step < 6) trace.add("$step:" + ranked.joinToString("/") { "${vocab[it]}=${"%.2f".format(java.util.Locale.US, last[it])}" })
-                                if (next == lastToken) repeats++ else repeats = 0
-                                lastToken = next
-                                // A stream such as EEEEE... is a decoder failure,
-                                // not a valid recognized equation. Report useful
-                                // diagnostics instead of inserting fabricated LaTeX.
-                                if (repeats >= 5) error("Decoder 重複輸出 ${vocab[next]}；前六步：${trace.joinToString(" | ")}")
-                                if (next == 2) {
-                                    val latex = output.joinToString(" ").trim().ifBlank { error("模型未辨識出公式；${trace.joinToString(" | ")}") }
-                                    record("EOS step=$step; result=$latex")
-                                    return latex
-                                }
-                                if (next != 0 && next != 1) output.add(vocab[next] ?: error("未知 token $next"))
-                                ids.add(next.toLong())
                             }
                         }
+                        if (expanded.isEmpty()) break
+                        // Keep a short, diverse list; normalization is only used for final ranking.
+                        beams = expanded.sortedByDescending { it.logp }.distinctBy { it.ids }.take(width)
+                        if (beams.all { it.ended }) break
                     }
-                    error("Decoder 達 160 token 上限且沒有 EOS；前六步：${trace.joinToString(" | ")}")
+                    val finished = beams.filter { it.ended }
+                    if (finished.isEmpty()) record("WARNING: no EOS among final beams")
+                    val ordered = (if (finished.isNotEmpty()) finished else beams)
+                        .sortedByDescending { it.logp / it.ids.size.toDouble().coerceAtLeast(2.0).pow(0.6) }
+                    lastCandidates = ordered.mapNotNull { beam ->
+                        val tokens = beam.ids.drop(1).takeWhile { it != 2L }.mapNotNull { vocab[it.toInt()] }
+                        val latex = tokens.joinToString(" ").trim()
+                        if (latex.isBlank()) null else Candidate(latex, beam.logp)
+                    }.distinctBy { it.latex }.take(3)
+                    lastCandidates.forEachIndexed { index, candidate -> record("Candidate ${index + 1}: score=${candidate.score} latex=${candidate.latex}") }
+                    return lastCandidates.firstOrNull()?.latex ?: error("模型沒有產生有效公式；請分享診斷檔")
                 }
             }
         }
