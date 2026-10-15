@@ -91,21 +91,44 @@ class GroupedGlyphRecognizer(private val single: SingleGlyphRecognizer) {
         if(b.w<18f || b.h<25f)return null
         return raw.map { PointF((it.x-b.l)/b.w,(it.y-b.t)/b.h) }
     }
+    /**
+     * Two-shape classifier for a single continuous stroke.  We test the actual
+     * pen trajectory (and its reverse) rather than assuming a straight tail.
+     * A handwritten 2 travels from its upper-left arc to the upper-right,
+     * descends to a lower-left corner, then finishes toward the lower-right.
+     * We abstain if the trajectory is too ambiguous.
+     */
     private fun classifyTwo(group:List<List<PointF>>):SingleGlyphRecognizer.Prediction? {
-        val p=normalize(group)?:return null
-        for(q in listOf(p,p.reversed())){
-            if(q.first().y>.32f || q.last().y<.65f || q.last().x<.62f)continue
-            val upper=q.filter{it.y<.42f}
-            val lower=q.filter{it.y>.66f}
-            if(upper.size<4 || lower.size<4)continue
-            val rightUpper=upper.maxOf{it.x}
-            val leftLower=lower.minOf{it.x}
-            val tail=q.takeLast(max(3,q.size/7))
-            if(rightUpper>.67f && leftLower<.35f &&
-               tail.last().x-tail.first().x>.20f &&
-               abs(tail.last().y-tail.first().y)<.22f &&
-               q.last().x-leftLower>.40f)
-                return SingleGlyphRecognizer.Prediction("2",.73f,"upper arc, lower-left bend and rightward tail")
+        val raw=normalize(group) ?: return null
+        for (q in listOf(raw, raw.reversed())) {
+            val first=q.first(); val last=q.last()
+            if (first.y > .38f || first.x > .65f || last.y < .59f || last.x < .60f) continue
+            // Find the lower-left corner in the latter portion of the stroke.
+            // Its path position matters: it must precede the final rightward tail.
+            val start=(q.size*.35f).toInt()
+            val stop=(q.size*.90f).toInt().coerceAtMost(q.lastIndex)
+            if (start >= stop) continue
+            val cornerIndex=(start..stop).minByOrNull { i ->
+                val v=q[i]
+                v.x + kotlin.math.abs(v.y-.90f)*.32f
+            } ?: continue
+            val corner=q[cornerIndex]
+            if (corner.x > .43f || corner.y < .58f) continue
+            val head=q.subList(0, cornerIndex+1)
+            val rightOnHead=head.filter { it.y < .65f }.maxOfOrNull { it.x } ?: 0f
+            val tail=q.subList(cornerIndex, q.size)
+            val rightward=last.x-corner.x
+            val upward=corner.y-last.y
+            // The top must bow to the right, the lower turn must be distinct,
+            // and the final tail must move right (slight upward curvature allowed).
+            if (rightOnHead < .64f || rightOnHead-corner.x < .20f ||
+                rightward < .36f || upward < -.17f || upward > .42f) continue
+            // Avoid classifying a zig-zag '3' as '2': the lower corner must
+            // occur after the upper-right excursion.
+            val topRightIndex=(0..cornerIndex).maxByOrNull { q[it].x } ?: continue
+            if (topRightIndex >= cornerIndex || cornerIndex < q.size/3) continue
+            return SingleGlyphRecognizer.Prediction(
+                "2", .77f, "upper-right arc, lower-left turn and rising rightward tail")
         }
         return null
     }
