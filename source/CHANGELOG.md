@@ -1,3 +1,9 @@
+## v1.0.5 (versionCode 25)
+- 原始／輕度平滑／保守字形修正三種觸控軌跡輸入。
+- CoMER 多版本離線辨識與候選合併，預覽候選顯示來源。
+- 修正自動模式顯示的舊版本號。
+- 實驗功能，尚未手機驗證。
+
 ## v1.0.4
 - Candidate ranking and UI preview fixes.
 - versionCode 24 / versionName 1.0.4.
