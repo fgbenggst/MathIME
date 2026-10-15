@@ -40,7 +40,7 @@ class OnnxMathRecognizer(private val context: Context) {
     fun recognize(bitmap: Bitmap, callback: (Result<String>) -> Unit) {
         worker.execute {
             diagnostics.setLength(0)
-            record("MathIME v0.9.4 diagnostic run")
+            record("MathIME v0.9.5 mask and numerical diagnostics")
             val result = runCatching { infer(bitmap) }
             result.onFailure { record("ERROR: ${it.stackTraceToString()}") }
             runCatching { saveDiagnostics() }
@@ -101,12 +101,14 @@ class OnnxMathRecognizer(private val context: Context) {
         }
         record("Input: ${w}x${h}; foreground > 0.5 = ${floats.count { it > 0.5f }} / ${floats.size}; range=${floats.minOrNull()}..${floats.maxOrNull()}")
         scaled.recycle(); padded.recycle()
-        // Do not mark the white canvas padding as invalid. The ONNX encoder
-        // was exported with a pixel mask; the whole padded image is a valid
-        // image, including white background. A cropped-only mask can discard
-        // the formula context and cause a collapsed decoder distribution.
+        // In the PyTorch-style attention padding mask, TRUE denotes an
+        // invalid/padded pixel. The 512x256 bitmap itself is fully valid,
+        // including its white background; therefore every pixel is FALSE.
+        // Previous versions set every byte TRUE, which can make attention
+        // softmax operate over exclusively masked (-Infinity) positions.
         val mask = ByteBuffer.allocateDirect(w * h).order(ByteOrder.nativeOrder())
-        repeat(w * h) { mask.put(1.toByte()) }
+        repeat(w * h) { mask.put(0.toByte()) }
+        record("Pixel mask: true=0 false=${w * h} (false=valid)")
         mask.rewind()
         OnnxTensor.createTensor(env, FloatBuffer.wrap(floats), longArrayOf(1, 1, h.toLong(), w.toLong())).use { image ->
             OnnxTensor.createTensor(env, mask, longArrayOf(1, h.toLong(), w.toLong()), OnnxJavaType.BOOL).use { pixelMask ->
@@ -118,6 +120,35 @@ class OnnxMathRecognizer(private val context: Context) {
                         "ARM 空間尺寸不相容：${featureShape.contentToString()}；輸入 256x512"
                     }
                     val encMask = encoded.get("encoder_mask").orElseThrow { IllegalStateException("Encoder 缺少 mask") } as OnnxTensor
+                    // Inspect actual numeric values, not just tensor shapes.
+                    val featureData = features.floatBuffer
+                    var finiteFeatures = 0L
+                    var nanFeatures = 0L
+                    var infFeatures = 0L
+                    var minFeature = Float.POSITIVE_INFINITY
+                    var maxFeature = Float.NEGATIVE_INFINITY
+                    while (featureData.hasRemaining()) {
+                        val v = featureData.get()
+                        when {
+                            v.isNaN() -> nanFeatures++
+                            v.isInfinite() -> infFeatures++
+                            else -> {
+                                finiteFeatures++
+                                if (v < minFeature) minFeature = v
+                                if (v > maxFeature) maxFeature = v
+                            }
+                        }
+                    }
+                    record("Encoder values: finite=$finiteFeatures NaN=$nanFeatures Inf=$infFeatures min=$minFeature max=$maxFeature")
+                    val maskData = encMask.byteBuffer
+                    var masked = 0L
+                    var valid = 0L
+                    while (maskData.hasRemaining()) {
+                        if (maskData.get().toInt() != 0) masked++ else valid++
+                    }
+                    record("Encoder mask: true(masked)=$masked false(valid)=$valid")
+                    check(nanFeatures == 0L && infFeatures == 0L) { "Encoder 輸出含非有限數值；請分享診斷檔" }
+                    check(valid > 0L) { "Encoder 遮罩沒有有效像素：全部被遮蔽；請分享診斷檔" }
                     val ids = ArrayList<Long>(); ids.add(1L) // <sos>
                     val output = ArrayList<String>()
                     val trace = ArrayList<String>()
@@ -140,7 +171,14 @@ class OnnxMathRecognizer(private val context: Context) {
                                 require(last.size == vocab.size) {
                                     "詞彙表與模型不符：logits=${last.size}，vocab=${vocab.size}"
                                 }
-                                require(last.all { it.isFinite() }) { "Decoder logits 出現 NaN/Infinity，step=$step" }
+                                val nanCount = last.count { it.isNaN() }
+                                val infCount = last.count { it.isInfinite() }
+                                if (step < 12 || nanCount > 0 || infCount > 0) {
+                                    record("Decoder step=$step logits: finite=${last.size - nanCount - infCount} NaN=$nanCount Inf=$infCount")
+                                }
+                                require(nanCount == 0 && infCount == 0) {
+                                    "Decoder logits 出現 NaN=$nanCount Inf=$infCount，step=$step；請分享診斷檔"
+                                }
                                 val ranked = last.indices.sortedByDescending { last[it] }.take(3)
                                 val next = ranked.firstOrNull() ?: error("空白 logits")
                                 if (step < 12) record("Top5: " + last.indices.sortedByDescending { last[it] }.take(5).joinToString(" | ") { "${it}:${vocab[it]}=${"%.3f".format(java.util.Locale.US, last[it])}" })

@@ -45,7 +45,7 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME 0.9.4｜CoMER 診斷版"
+            text = "MathIME 0.9.5｜CoMER 遮罩診斷版"
             textSize = 13f
         }
         root.addView(status)
