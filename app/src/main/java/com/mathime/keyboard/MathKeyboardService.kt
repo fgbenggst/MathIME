@@ -26,7 +26,7 @@ class MathKeyboardService : InputMethodService() {
     private var auto = false
     private var recognizer: OnnxMathRecognizer? = null
     private val symbolRecognizer = StrokeRecognizer()
-    private val singleGlyphRecognizer = SingleGlyphRecognizer()
+    private val singleGlyphRecognizer = SingleGlyphRecognizer()\n    private val groupedGlyphRecognizer = GroupedGlyphRecognizer(singleGlyphRecognizer)
     private var recognizing = false
     private var nextPrecise = false
     private var candidateIndex = 0
@@ -395,6 +395,7 @@ class MathKeyboardService : InputMethodService() {
         // Independent geometry classifier; never replace the formula model on ambiguous input.
         val geometryAnalysis = if (calibrate) null else singleGlyphRecognizer.analyze(ink.getStrokes())
         val singleGlyph = geometryAnalysis?.prediction
+        val groupedAnalysis = if (calibrate || singleGlyph != null) null else groupedGlyphRecognizer.analyze(ink.getStrokes())
         val precise = nextPrecise
         nextPrecise = false
         val variants = if (calibrate) {
@@ -419,11 +420,14 @@ class MathKeyboardService : InputMethodService() {
         engine.setCalibrationMode(calibrate)
         engine.recognizeVariants(variants) { result ->
             geometryAnalysis?.let { engine.appendExternalDiagnostic(it.diagnostic) }
+            groupedAnalysis?.let { engine.appendExternalDiagnostic(it.diagnostic) }
             val elapsed = android.os.SystemClock.elapsedRealtime() - startMs
             recognizing = false
             result.onSuccess { latex ->
                 val modelCandidates = engine.candidates()
-                val geometryCandidate = singleGlyph?.let {
+                val geometryCandidate = if (groupedAnalysis?.latex != null) {
+                    OnnxMathRecognizer.Candidate(groupedAnalysis.latex, 0.0, "筆畫分組幾何辨識（實驗）")
+                } else singleGlyph?.let {
                     OnnxMathRecognizer.Candidate(it.latex, 0.0, "單字元幾何辨識（${(it.confidence*100).toInt()}% 規則分數）")
                 }
                 candidateResults = if (geometryCandidate != null) {
