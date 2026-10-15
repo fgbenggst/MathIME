@@ -45,7 +45,7 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME 0.9｜CoMER 離線手寫公式辨識"
+            text = "MathIME 0.9.2｜CoMER 空間維度測試"
             textSize = 13f
         }
         root.addView(status)

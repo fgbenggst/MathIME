@@ -55,19 +55,26 @@ class OnnxMathRecognizer(private val context: Context) {
         val enc = checkNotNull(encoder)
         val dec = checkNotNull(decoder)
         val vocab = checkNotNull(words)
-        // CoMER consumes dark ink as 1.0, white background as 0.0.
-        // Pad dimensions to multiples of 64: the CoMER ARM decoder splits
-        // encoder spatial dimensions into groups of 16 after 4x downsampling.
-        // Padding only to 16 can yield enc_w=152 and crash Reshape_5.
-        val targetHeight = 128
-        val scale = minOf(targetHeight.toFloat() / bitmap.height, 768f / bitmap.width)
-        val w = max(16, ((bitmap.width * scale).roundToInt() + 63) / 64 * 64)
-        val h = max(16, ((bitmap.height * scale).roundToInt() + 63) / 64 * 64)
+        // ARM exported graph has a 16-way spatial reshape. A 64-pixel
+        // input multiple is NOT enough: the encoder downsamples 16x,
+        // yielding shapes like [1,8,28,256] (not divisible by 16).
+        // Use 256x512 input => expected spatial features [16,32].
+        // This is a compatibility experiment, not a validated model fix.
+        val h = 256
+        val w = 512
+        val margin = 16
+        val scale = minOf((w - 2 * margin).toFloat() / bitmap.width,
+                          (h - 2 * margin).toFloat() / bitmap.height)
         val scaledW = max(1, (bitmap.width * scale).roundToInt())
         val scaledH = max(1, (bitmap.height * scale).roundToInt())
+        val offsetX = (w - scaledW) / 2
+        val offsetY = (h - scaledH) / 2
         val scaled = Bitmap.createScaledBitmap(bitmap, scaledW, scaledH, true)
         val padded = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        Canvas(padded).apply { drawColor(Color.WHITE); drawBitmap(scaled, 0f, 0f, null) }
+        Canvas(padded).apply {
+            drawColor(Color.WHITE)
+            drawBitmap(scaled, offsetX.toFloat(), offsetY.toFloat(), null)
+        }
         val pixels = IntArray(w * h)
         padded.getPixels(pixels, 0, w, 0, 0, w, h)
         val floats = FloatArray(w * h) { i ->
@@ -76,8 +83,10 @@ class OnnxMathRecognizer(private val context: Context) {
         }
         scaled.recycle(); padded.recycle()
         val mask = ByteBuffer.allocateDirect(w * h).order(ByteOrder.nativeOrder())
-        // True means a valid (non-padding) pixel for this exported model.
-        repeat(h) { y -> repeat(w) { x -> mask.put(if (x < scaledW && y < scaledH) 1.toByte() else 0.toByte()) } }
+        repeat(h) { y -> repeat(w) { x ->
+            val valid = x >= offsetX && x < offsetX + scaledW && y >= offsetY && y < offsetY + scaledH
+            mask.put(if (valid) 1.toByte() else 0.toByte())
+        } }
         mask.rewind()
         OnnxTensor.createTensor(env, FloatBuffer.wrap(floats), longArrayOf(1, 1, h.toLong(), w.toLong())).use { image ->
             OnnxTensor.createTensor(env, mask, longArrayOf(1, h.toLong(), w.toLong()), OnnxJavaType.BOOL).use { pixelMask ->
@@ -85,14 +94,21 @@ class OnnxMathRecognizer(private val context: Context) {
                     val features = encoded.get("encoder_features").orElseThrow { IllegalStateException("Encoder 缺少 features") } as OnnxTensor
                     val featureShape = features.info.shape
                     require(featureShape.size == 4 && featureShape[1] % 16L == 0L && featureShape[2] % 16L == 0L) {
-                        "CoMER encoder feature shape incompatible with ARM attention: ${featureShape.contentToString()}"
+                        "ARM 空間尺寸不相容：${featureShape.contentToString()}；輸入 256x512"
                     }
                     val encMask = encoded.get("encoder_mask").orElseThrow { IllegalStateException("Encoder 缺少 mask") } as OnnxTensor
                     val ids = ArrayList<Long>(); ids.add(1L) // <sos>
                     val output = ArrayList<String>()
                     for (step in 0 until 160) {
                         OnnxTensor.createTensor(env, LongBuffer.wrap(ids.toLongArray()), longArrayOf(1, ids.size.toLong())).use { inputIds ->
-                            dec.run(mapOf("encoder_features" to features, "encoder_mask" to encMask, "input_ids" to inputIds)).use { decoded ->
+                            val decodedResult = try {
+                                dec.run(mapOf("encoder_features" to features, "encoder_mask" to encMask, "input_ids" to inputIds))
+                            } catch (e: Exception) {
+                                throw IllegalStateException(
+                                    "Decoder 第 $step 步失敗；特徵=${featureShape.contentToString()}；tokens=${ids.size}；${e.message}", e
+                                )
+                            }
+                            decodedResult.use { decoded ->
                                 val logits = decoded[0].value as? Array<*> ?: error("Decoder 輸出格式不符")
                                 val sequence = logits[0] as? Array<*> ?: error("Decoder 輸出序列格式不符")
                                 val last = sequence.last() as? FloatArray ?: error("Decoder logits 不是 float32")
