@@ -41,6 +41,8 @@ class OnnxMathRecognizer(private val context: Context) {
     data class Candidate(val latex: String, val score: Double, val source: String = "原始筆跡")
     private var activeVariantIndex = 0
     @Volatile private var precisionMode = false
+    @Volatile private var calibrationMode = false
+    fun setCalibrationMode(enabled: Boolean) { calibrationMode = enabled }
     fun setPrecisionMode(enabled: Boolean) { precisionMode = enabled }
     private var lastCandidates: List<Candidate> = emptyList()
     fun candidates(): List<Candidate> = lastCandidates.toList()
@@ -55,12 +57,12 @@ class OnnxMathRecognizer(private val context: Context) {
         worker.execute {
             diagnostics.setLength(0)
             uncertain = false
-            record("MathIME v1.0.13 diagnostics; mode=${if (precisionMode) "precise" else "fast"}")
+            record("MathIME v1.0.14 diagnostics; mode=${if (calibrationMode) "calibration" else if (precisionMode) "precise" else "fast"}")
             val totalStart = android.os.SystemClock.elapsedRealtime()
             val result = runCatching {
                 val combined = mutableListOf<Candidate>()
                 val failures = mutableListOf<String>()
-                for ((variantIndex, pair) in variants.take(if (precisionMode) 2 else 1).withIndex()) {
+                for ((variantIndex, pair) in variants.take(if (calibrationMode) 3 else if (precisionMode) 2 else 1).withIndex()) {
                     val variantStart = android.os.SystemClock.elapsedRealtime()
                     val (name, bitmap) = pair
                     runCatching {
@@ -82,7 +84,7 @@ class OnnxMathRecognizer(private val context: Context) {
                         record("Variant failed: $name ${e.stackTraceToString()}")
                     }
                 }
-                lastCandidates = rankAcrossVariants(combined).take(if (precisionMode) 9 else 3)
+                lastCandidates = rankAcrossVariants(combined).take(if (calibrationMode || precisionMode) 9 else 3)
                 record("Total elapsedMs=${android.os.SystemClock.elapsedRealtime() - totalStart}")
                 record("Merged candidates: ${lastCandidates.size}; failures=$failures")
                 lastCandidates.firstOrNull()?.latex ?: error("辨識失敗：${failures.joinToString()}")
@@ -131,7 +133,11 @@ class OnnxMathRecognizer(private val context: Context) {
         // This is a compatibility experiment, not a validated model fix.
         val h = 256
         val w = 512
-        val margin = 16
+        // Calibration is an explicit diagnostic operation, never an automatic "fix".
+        // 0: baseline; 1: inverted model tensor; 2: smaller glyph with more padding.
+        val calibrationVariant = if (calibrationMode) activeVariantIndex else 0
+        val margin = if (calibrationVariant == 2) 72 else 16
+        record("Calibration preprocessing: variant=$calibrationVariant margin=$margin polarity=${if (calibrationVariant == 1) "inverted" else "baseline"}")
         val scale = minOf((w - 2 * margin).toFloat() / bitmap.width,
                           (h - 2 * margin).toFloat() / bitmap.height)
         val scaledW = max(1, (bitmap.width * scale).roundToInt())
@@ -150,6 +156,10 @@ class OnnxMathRecognizer(private val context: Context) {
             val p = pixels[i]
             1f - ((((p shr 16) and 255) * .299f + ((p shr 8) and 255) * .587f + (p and 255) * .114f) / 255f)
         }
+        if (calibrationVariant == 1) {
+            for (i in floats.indices) floats[i] = 1f - floats[i]
+        }
+        record("Preprocess scale=$scale scaled=${scaledW}x${scaledH} offset=($offsetX,$offsetY)")
         record("Input: ${w}x${h}; foreground > 0.5 = ${floats.count { it > 0.5f }} / ${floats.size}; range=${floats.minOrNull()}..${floats.maxOrNull()}")
         // Exact 512x256 grayscale input visualization, reconstructed from the FLOAT tensor.
         // White = 0.0, black = 1.0; this is what the encoder receives.

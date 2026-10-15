@@ -223,9 +223,10 @@ class MathKeyboardService : InputMethodService() {
                 }
             }
         }
-        row("精準辨識", "清空全部", "診斷分享", "🌐") { label ->
+        row("精準辨識", "校準測試", "清空全部", "診斷分享", "🌐") { label ->
             when (label) {
                 "精準辨識" -> { nextPrecise = true; recognize() }
+                "校準測試" -> recognize(calibrate = true)
                 "清空全部" -> { clearHandwriting(); formula.setText(""); candidateResults = emptyList(); candidateIndex = 0; refreshCandidateButtons(); status.text = "已清空筆跡與公式" }
                 "診斷分享" -> shareDiagnostics()
                 "🌐" -> switchKeyboard()
@@ -368,7 +369,7 @@ class MathKeyboardService : InputMethodService() {
         true
     } catch (_: java.io.IOException) { false }
 
-    private fun recognize() {
+    private fun recognize(calibrate: Boolean = false) {
         if (recognizing) return
         if (!ink.hasInk()) { status.text = "請先在白色區域書寫"; return }
         // Prefer actual CoMER inference; fall back only when model assets are missing.
@@ -392,11 +393,16 @@ class MathKeyboardService : InputMethodService() {
         }
         val precise = nextPrecise
         nextPrecise = false
-        val variants = if (precise) ink.exportVariants() else listOfNotNull(ink.exportInkBitmap()?.let { "原始筆跡" to it })
+        val variants = if (calibrate) {
+            // Export three independent bitmaps: the recognizer owns/recycles each one.
+            listOf("基準輸入", "反相輸入（實驗）", "增加留白（實驗）")
+                .mapNotNull { name -> ink.exportInkBitmap()?.let { name to it } }
+        } else if (precise) ink.exportVariants()
+          else listOfNotNull(ink.exportInkBitmap()?.let { "原始筆跡" to it })
         if (variants.isEmpty()) { status.text = "沒有可辨識的筆跡"; return }
         recognizing = true
         val startMs = android.os.SystemClock.elapsedRealtime()
-        status.text = if (precise) "正在精準辨識…" else "正在快速辨識…"
+        status.text = if (calibrate) "正在校準測試（三次推論，可能較慢）…" else if (precise) "正在精準辨識…" else "正在快速辨識…"
         val engine = try {
             recognizer ?: OnnxMathRecognizer(applicationContext).also { recognizer = it }
         } catch (e: Throwable) {
@@ -406,6 +412,7 @@ class MathKeyboardService : InputMethodService() {
             return
         }
         engine.setPrecisionMode(precise)
+        engine.setCalibrationMode(calibrate)
         engine.recognizeVariants(variants) { result ->
             val elapsed = android.os.SystemClock.elapsedRealtime() - startMs
             recognizing = false
