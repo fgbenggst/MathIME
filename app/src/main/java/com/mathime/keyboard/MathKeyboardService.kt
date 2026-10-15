@@ -26,7 +26,8 @@ class MathKeyboardService : InputMethodService() {
     private var auto = false
     private var recognizer: OnnxMathRecognizer? = null
     private val symbolRecognizer = StrokeRecognizer()
-    private val singleGlyphRecognizer = SingleGlyphRecognizer()\n    private val groupedGlyphRecognizer = GroupedGlyphRecognizer(singleGlyphRecognizer)
+    private val singleGlyphRecognizer = SingleGlyphRecognizer()
+    private val groupedGlyphRecognizer = GroupedGlyphRecognizer(singleGlyphRecognizer)
     private var recognizing = false
     private var nextPrecise = false
     private var candidateIndex = 0
