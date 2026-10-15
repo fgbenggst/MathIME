@@ -39,6 +39,7 @@ class OnnxMathRecognizer(private val context: Context) {
     private fun saveDiagnostics() { diagnosticFile().writeText(diagnostics.toString()) }
 
     data class Candidate(val latex: String, val score: Double, val source: String = "原始筆跡")
+    private var activeVariantIndex = 0
     private var lastCandidates: List<Candidate> = emptyList()
     fun candidates(): List<Candidate> = lastCandidates.toList()
 
@@ -49,7 +50,7 @@ class OnnxMathRecognizer(private val context: Context) {
     fun recognizeVariants(variants: List<Pair<String, Bitmap>>, callback: (Result<String>) -> Unit) {
         worker.execute {
             diagnostics.setLength(0)
-            record("MathIME v1.0.6 candidate diagnostics")
+            record("MathIME v1.0.7 candidate diagnostics")
             val result = runCatching {
                 val combined = mutableListOf<Candidate>()
                 val failures = mutableListOf<String>()
@@ -63,6 +64,7 @@ class OnnxMathRecognizer(private val context: Context) {
                     record("Saved input variant $variantIndex to internal files: mathime_input_variant_${variantIndex}.png")
                     record("=== variant: $name ===")
                     try {
+                        activeVariantIndex = variantIndex
                         infer(bitmap)
                         val candidatesForVariant = lastCandidates.toList()
                         record("Variant $name: ${candidatesForVariant.joinToString { it.latex }}")
@@ -138,6 +140,23 @@ class OnnxMathRecognizer(private val context: Context) {
             1f - ((((p shr 16) and 255) * .299f + ((p shr 8) and 255) * .587f + (p and 255) * .114f) / 255f)
         }
         record("Input: ${w}x${h}; foreground > 0.5 = ${floats.count { it > 0.5f }} / ${floats.size}; range=${floats.minOrNull()}..${floats.maxOrNull()}")
+        // Exact 512x256 grayscale input visualization, reconstructed from the FLOAT tensor.
+        // White = 0.0, black = 1.0; this is what the encoder receives.
+        runCatching {
+            val diagnosticPixels = IntArray(floats.size) { i ->
+                val gray = (255f * (1f - floats[i].coerceIn(0f, 1f))).roundToInt().coerceIn(0, 255)
+                Color.rgb(gray, gray, gray)
+            }
+            val diagnosticBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            try {
+                diagnosticBitmap.setPixels(diagnosticPixels, 0, w, 0, 0, w, h)
+                val filename = "mathime_tensor_variant_${activeVariantIndex}.png"
+                File(context.filesDir, filename).outputStream().use {
+                    diagnosticBitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+                }
+                record("Saved exact encoder pixel_values visualization: $filename")
+            } finally { diagnosticBitmap.recycle() }
+        }.onFailure { record("Tensor PNG save error: ${it.message}") }
         scaled.recycle(); padded.recycle()
         // In the PyTorch-style attention padding mask, TRUE denotes an
         // invalid/padded pixel. The 512x256 bitmap itself is fully valid,
@@ -193,10 +212,11 @@ class OnnxMathRecognizer(private val context: Context) {
                     val width = 9 // wider beam pool; select structurally valid alternatives
                     val maxTokens = 64
                     var beams = listOf(Beam(listOf(1L), 0.0, false))
+                    val completed = ArrayList<Beam>()
                     for (step in 0 until maxTokens) {
                         val expanded = ArrayList<Beam>()
                         for (beam in beams) {
-                            if (beam.ended) { expanded.add(beam); continue }
+                            if (beam.ended) { completed.add(beam); continue }
                             OnnxTensor.createTensor(env, LongBuffer.wrap(beam.ids.toLongArray()), longArrayOf(1, beam.ids.size.toLong())).use { inputIds ->
                                 dec.run(mapOf("encoder_features" to features, "encoder_mask" to encMask, "input_ids" to inputIds)).use { decoded ->
                                     val tensor = decoded[0] as OnnxTensor
@@ -220,7 +240,8 @@ class OnnxMathRecognizer(private val context: Context) {
                                         // legitimate expressions may contain the same factor twice.
                                         val loopPenalty = if (id != 2 && repeatsTailBlock(nextIds)) 4.0 else 0.0
                                         val symbolPenalty = if (id != 2 && repeatedSingleSymbol(nextIds, vocab)) 2.0 else 0.0
-                                        expanded.add(Beam(nextIds, beam.logp + logits[id].toDouble() - logNorm - loopPenalty - symbolPenalty, id == 2))
+                                        val candidate = Beam(nextIds, beam.logp + logits[id].toDouble() - logNorm - loopPenalty - symbolPenalty, id == 2)
+                                        if (candidate.ended) completed.add(candidate) else expanded.add(candidate)
                                     }
                                 }
                             }
@@ -228,9 +249,10 @@ class OnnxMathRecognizer(private val context: Context) {
                         if (expanded.isEmpty()) break
                         // Keep a short, diverse list; normalization is only used for final ranking.
                         beams = expanded.sortedByDescending { it.logp }.distinctBy { it.ids }.take(width)
-                        if (beams.all { it.ended }) break
+                        if (beams.isEmpty()) break
                     }
-                    val finished = beams.filter { it.ended }
+                    val finished = completed.distinctBy { it.ids }
+                    record("Beam finished hypotheses retained=${finished.size}, active=${beams.size}")
                     if (finished.isEmpty()) record("WARNING: no EOS among final beams")
                     // Rank by model likelihood plus *soft* structure and loop penalties.
                     // Never delete or replace an actual predicted token (including E).
