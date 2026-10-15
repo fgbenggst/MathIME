@@ -277,16 +277,44 @@ class MathKeyboardService : InputMethodService() {
         if (!switched) (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
     }
 
+    /** Shares both readable diagnostics and the exact images passed to ONNX.
+     * FileProvider grants temporary read access without exposing private app storage.
+     */
     private fun shareDiagnostics() {
-        val file = recognizer?.diagnosticFile()
-        if (file == null || !file.exists()) { status.text = "請先辨識，再分享診斷"; return }
-        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(android.content.Intent.EXTRA_SUBJECT, "MathIME CoMER diagnostics")
-            putExtra(android.content.Intent.EXTRA_TEXT, file.readText().takeLast(45000))
-            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        val log = recognizer?.diagnosticFile()
+        if (log == null || !log.exists()) {
+            status.text = "請先辨識，再分享診斷"
+            return
         }
-        startActivity(android.content.Intent.createChooser(intent, "分享辨識診斷").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+        try {
+            val images = (0..2).mapNotNull { index ->
+                java.io.File(filesDir, "mathime_tensor_variant_${index}.png")
+                    .takeIf { it.isFile && it.length() > 0L &&
+                        // Only include variants created in the latest recognition run.
+                        log.readText().contains("mathime_tensor_variant_${index}.png") }
+            }
+            val files = listOf(log) + images
+            val uris = ArrayList<android.net.Uri>(files.map { file ->
+                androidx.core.content.FileProvider.getUriForFile(
+                    this, "$packageName.fileprovider", file)
+            })
+            val intent = android.content.Intent(android.content.Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "*/*"
+                putExtra(android.content.Intent.EXTRA_SUBJECT, "MathIME v1.0.12 辨識診斷")
+                putExtra(android.content.Intent.EXTRA_TEXT,
+                    "MathIME 診斷文字及模型輸入圖片（512×256）\n\n" + log.readText().takeLast(45000))
+                putParcelableArrayListExtra(android.content.Intent.EXTRA_STREAM, uris)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                clipData = android.content.ClipData.newUri(contentResolver, "MathIME diagnostics", uris.first()).also { clip ->
+                    uris.drop(1).forEach { clip.addItem(android.content.ClipData.Item(it)) }
+                }
+            }
+            startActivity(android.content.Intent.createChooser(intent, "分享診斷文字與 PNG")
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION))
+            status.text = "已準備診斷文字與 ${images.size} 張 PNG"
+        } catch (e: Exception) {
+            status.text = "診斷分享失敗：${e.message}"
+        }
     }
 
     private fun updatePreview(latex: String) {
