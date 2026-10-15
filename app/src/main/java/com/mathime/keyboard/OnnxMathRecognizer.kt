@@ -55,7 +55,7 @@ class OnnxMathRecognizer(private val context: Context) {
         worker.execute {
             diagnostics.setLength(0)
             uncertain = false
-            record("MathIME v1.0.11 diagnostics; mode=${if (precisionMode) "precise" else "fast"}")
+            record("MathIME v1.0.13 diagnostics; mode=${if (precisionMode) "precise" else "fast"}")
             val totalStart = android.os.SystemClock.elapsedRealtime()
             val result = runCatching {
                 val combined = mutableListOf<Candidate>()
@@ -226,6 +226,9 @@ class OnnxMathRecognizer(private val context: Context) {
                     val decodeStart = android.os.SystemClock.elapsedRealtime()
                     var beams = listOf(Beam(listOf(1L), 0.0, false))
                     val completed = ArrayList<Beam>()
+                    // Save step-zero single-symbol possibilities. They will be evaluated
+                    // with a real decoder EOS step rather than invented substitutions.
+                    val firstStepSymbols = ArrayList<Pair<Int, Double>>()
                     for (step in 0 until maxTokens) {
                         if (step > 0 && android.os.SystemClock.elapsedRealtime() - decodeStart >= decoderBudgetMs) {
                             record("Decoder time budget reached at step=$step; completed=${completed.size}")
@@ -246,6 +249,15 @@ class OnnxMathRecognizer(private val context: Context) {
                                     val sumExp = logits.sumOf { kotlin.math.exp(it.toDouble() - maxLogit) }
                                     val logNorm = maxLogit + kotlin.math.ln(sumExp)
                                     val best = logits.indices.sortedByDescending { logits[it] }.take(width + 2)
+                                    if (step == 0 && beam.ids.size == 1) {
+                                        firstStepSymbols.clear()
+                                        logits.indices.sortedByDescending { logits[it] }
+                                            .filter { it != 0 && it != 1 && it != 2 && isSingleGlyphToken(vocab[it] ?: "") }
+                                            .take(12).forEach { id ->
+                                                firstStepSymbols.add(id to (logits[id].toDouble() - logNorm))
+                                            }
+                                        record("Single-glyph step0 shortlist: " + firstStepSymbols.joinToString { "${vocab[it.first]}:${"%.3f".format(java.util.Locale.US, it.second)}" })
+                                    }
                                     if (step < 5 && beam === beams.first()) {
                                         record("Beam step=$step ids=${beam.ids.joinToString(",")} top=" + best.take(5).joinToString(" | ") { "${vocab[it]}:${"%.2f".format(java.util.Locale.US, logits[it])}" })
                                         val watch = listOf("x", "2", "+", "I", "i", "E", "\\pi", "<eos>")
@@ -299,8 +311,47 @@ class OnnxMathRecognizer(private val context: Context) {
                         }
                         .filter { it.first.isNotBlank() }
                         .sortedByDescending { it.second }
-                    lastCandidates = ordered.distinctBy { it.first }
+                    val normalCandidates = ordered.distinctBy { it.first }
                         .take(if (precisionMode) 6 else 3).map { Candidate(it.first, it.second) }
+                    // Only probe short-form alternatives if the leading prediction is
+                    // suspicious. This adds at most twelve tiny decoder passes and is
+                    // not a replacement for a dedicated glyph classifier.
+                    val suspiciousSymbols = setOf("I", "i", "E", "\\pi", "\\sum")
+                    val leadingTokens = normalCandidates.firstOrNull()?.latex?.split(Regex("\\s+")) ?: emptyList()
+                    val likelyHallucination = leadingTokens.size >= 3 && leadingTokens.count { it in suspiciousSymbols } >= 2
+                    val shortCandidates = ArrayList<Candidate>()
+                    if (likelyHallucination) {
+                        val probeStart = android.os.SystemClock.elapsedRealtime()
+                        for ((id, firstLogP) in firstStepSymbols) {
+                            if (android.os.SystemClock.elapsedRealtime() - probeStart > 220L) break
+                            runCatching {
+                                OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(1L, id.toLong())), longArrayOf(1, 2)).use { idsTensor ->
+                                    dec.run(mapOf("encoder_features" to features, "encoder_mask" to encMask, "input_ids" to idsTensor)).use { output ->
+                                        val sequence = ((output[0] as OnnxTensor).value as Array<*>)[0] as Array<*>
+                                        val logits = sequence.last() as FloatArray
+                                        val maxValue = logits.maxOrNull()!!.toDouble()
+                                        val norm = maxValue + kotlin.math.ln(logits.sumOf { kotlin.math.exp(it.toDouble() - maxValue) })
+                                        val eosLogP = logits[2].toDouble() - norm
+                                        val symbol = vocab[id]!!
+                                        val fullScore = firstLogP + eosLogP
+                                        record("Single-glyph complete: $symbol -> EOS logp=${"%.3f".format(java.util.Locale.US, fullScore)} eosP=${"%.4f".format(java.util.Locale.US, kotlin.math.exp(eosLogP))}")
+                                        shortCandidates.add(Candidate(symbol, fullScore, "單字元路徑"))
+                                    }
+                                }
+                            }.onFailure { record("Single-glyph probe failed: ${it.message}") }
+                        }
+                    }
+                    // Preserve the model's main result; expose a complete single-token
+                    // candidate in the last slot when its EOS-supported score warrants it.
+                    val maxCandidates = if (precisionMode) 6 else 3
+                    val distinct = normalCandidates.toMutableList()
+                    val bestShort = shortCandidates.maxByOrNull { it.score }
+                    if (bestShort != null && distinct.none { it.latex == bestShort.latex }) {
+                        if (distinct.size >= maxCandidates) distinct.removeAt(distinct.lastIndex)
+                        distinct.add(bestShort)
+                        record("Single-glyph alternative added: ${bestShort.latex}; not auto-promoted")
+                    }
+                    lastCandidates = distinct.take(maxCandidates)
                     val suspicious = setOf("I", "i", "E", "\\pi", "\\sum")
                     val topTokens = lastCandidates.firstOrNull()?.latex?.split(Regex("\\s+")) ?: emptyList()
                     val suspiciousCount = topTokens.count { it in suspicious }
@@ -376,6 +427,11 @@ class OnnxMathRecognizer(private val context: Context) {
             if (t.length == 1 && t[0].isLetter() && tokens.subList(i-3, i+1).all { it == t }) penalty += 2.5
         }
         return penalty
+    }
+
+    private fun isSingleGlyphToken(token: String): Boolean {
+        if (token.length == 1 && token[0].isLetterOrDigit()) return true
+        return token in setOf("+", "-", "=", "\\pi", "\\alpha", "\\beta", "\\theta", "\\lambda", "\\infty", "\\times", "\\pm")
     }
 
     private fun repeatedSingleSymbol(ids: List<Long>, vocab: Map<Int, String>): Boolean {
