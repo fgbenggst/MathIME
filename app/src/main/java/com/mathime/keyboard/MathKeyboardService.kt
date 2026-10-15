@@ -17,6 +17,8 @@ class MathKeyboardService : InputMethodService() {
     private val handler = Handler(Looper.getMainLooper())
     private var auto = false
     private var recognizer: OnnxMathRecognizer? = null
+    private val symbolRecognizer = StrokeRecognizer()
+    private var recognizing = false
     private lateinit var ink: HandwritingView
     private lateinit var formula: EditText
     private lateinit var status: TextView
@@ -30,7 +32,7 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME 0.5｜離線 ONNX 推論（需安裝相容模型）"
+            text = "MathIME 0.6｜離線單符號辨識；完整公式需模型"
             textSize = 13f
         }
         root.addView(status)
@@ -108,15 +110,43 @@ class MathKeyboardService : InputMethodService() {
     }
 
     private fun recognize() {
+        if (recognizing) return
         if (!ink.hasInk()) { status.text = "請先在白色區域書寫"; return }
-        status.text = "正在本地辨識…"
+        // An actual pretrained model may be supplied later. Until then use an honest,
+        // deliberately limited single-stroke recognizer rather than fabricated LaTeX.
+        val hasModel = try {
+            assets.open("math_ctc.onnx").use { true }
+        } catch (_: java.io.IOException) { false }
+        if (!hasModel) {
+            val strokes = ink.getStrokes()
+            val guess = symbolRecognizer.recognize(strokes)
+            if (guess == null) {
+                status.text = "離線單符號辨識不確定；請使用符號鍵或手動輸入 LaTeX"
+            } else {
+                val symbol = when (guess.symbol) {
+                    "∫" -> "\\int "
+                    "∞" -> "\\infty "
+                    else -> guess.symbol
+                }
+                formula.setText(symbol)
+                formula.setSelection(symbol.length)
+                status.text = "候選：${guess.symbol}（${(guess.score * 100).toInt()}% 相似度，非機率）；請核對"
+            }
+            return
+        }
         val bitmap = ink.exportInkBitmap() ?: run { status.text = "沒有可辨識的筆跡"; return }
-        val engine = try { recognizer ?: OnnxMathRecognizer(applicationContext).also { recognizer = it } } catch (e: Throwable) {
+        recognizing = true
+        status.text = "正在本地模型辨識…"
+        val engine = try {
+            recognizer ?: OnnxMathRecognizer(applicationContext).also { recognizer = it }
+        } catch (e: Throwable) {
+            recognizing = false
             bitmap.recycle()
             status.text = "辨識引擎無法啟動：${e.message ?: e.javaClass.simpleName}"
             return
         }
         engine.recognize(bitmap) { result ->
+            recognizing = false
             bitmap.recycle()
             result.onSuccess { latex ->
                 formula.setText(latex)
