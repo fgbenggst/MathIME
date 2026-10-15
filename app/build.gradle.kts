@@ -2,7 +2,7 @@ plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
 android {
     namespace = "com.mathime.keyboard"
     compileSdk = 35
-    defaultConfig { applicationId = "com.mathime.keyboard"; minSdk = 26; targetSdk = 35; versionCode = 15; versionName = "0.9.2-comer-spatial-test" }
+    defaultConfig { applicationId = "com.mathime.keyboard"; minSdk = 26; targetSdk = 35; versionCode = 17; versionName = "0.9.4-comer-diagnostics" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
 }

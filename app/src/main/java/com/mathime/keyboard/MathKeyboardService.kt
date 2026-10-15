@@ -45,7 +45,7 @@ class MathKeyboardService : InputMethodService() {
             setBackgroundColor(Color.rgb(235, 239, 244))
         }
         status = TextView(this).apply {
-            text = "MathIME 0.9.2｜CoMER 空間維度測試"
+            text = "MathIME 0.9.4｜CoMER 診斷版"
             textSize = 13f
         }
         root.addView(status)
@@ -139,7 +139,7 @@ class MathKeyboardService : InputMethodService() {
                 }
             }
         }
-        row("重新書寫", "模型狀態", "🌐") { label ->
+        row("重新書寫", "診斷分享", "🌐") { label ->
             if (label == "重新書寫") {
                 handler.removeCallbacks(pending)
                 ink.clear()
@@ -147,7 +147,18 @@ class MathKeyboardService : InputMethodService() {
             } else if (label == "🌐") {
                 val switched = try { switchToNextInputMethod(false) } catch (_: Exception) { false }
                 if (!switched) (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
-            } else status.text = if (hasModelFiles()) "已找到模型檔案；相容性需實際辨識驗證" else "缺少 CoMER ONNX 模型檔案"
+            } else if (label == "診斷分享") {
+                val file = recognizer?.diagnosticFile()
+                if (file != null && file.exists()) {
+                    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(android.content.Intent.EXTRA_SUBJECT, "MathIME CoMER diagnostics")
+                        putExtra(android.content.Intent.EXTRA_TEXT, file.readText().takeLast(45000))
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(android.content.Intent.createChooser(intent, "分享辨識診斷").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                } else status.text = "請先執行一次辨識，再分享診斷"
+            }
         }
         return root
     }
@@ -234,7 +245,7 @@ class MathKeyboardService : InputMethodService() {
             result.onSuccess { latex ->
                 formula.setText(latex)
                 formula.setSelection(latex.length)
-                status.text = "本地辨識完成，請核對 LaTeX"
+                status.text = "辨識候選（尚未驗證正確），請核對；可按診斷分享"
             }.onFailure { error ->
                 status.text = error.message ?: "辨識失敗；筆跡已保留"
             }

@@ -14,6 +14,8 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
 import java.util.concurrent.Executors
+import java.io.File
+import android.util.Log
 import android.os.Handler
 import android.os.Looper
 import kotlin.math.max
@@ -27,10 +29,21 @@ class OnnxMathRecognizer(private val context: Context) {
     private var encoder: OrtSession? = null
     private var decoder: OrtSession? = null
     private var words: Map<Int, String>? = null
+    private val diagnostics = StringBuilder()
+    private fun record(message: String) {
+        diagnostics.append(message).append("\n")
+        Log.i("MathIME-CoMER", message.take(3500))
+    }
+    fun diagnosticFile(): File = File(context.filesDir, "comer_diagnostics.txt")
+    private fun saveDiagnostics() { diagnosticFile().writeText(diagnostics.toString()) }
 
     fun recognize(bitmap: Bitmap, callback: (Result<String>) -> Unit) {
         worker.execute {
+            diagnostics.setLength(0)
+            record("MathIME v0.9.4 diagnostic run")
             val result = runCatching { infer(bitmap) }
+            result.onFailure { record("ERROR: ${it.stackTraceToString()}") }
+            runCatching { saveDiagnostics() }
             main.post { callback(result) }
         }
     }
@@ -55,6 +68,11 @@ class OnnxMathRecognizer(private val context: Context) {
         val enc = checkNotNull(encoder)
         val dec = checkNotNull(decoder)
         val vocab = checkNotNull(words)
+        record("Encoder inputs: ${enc.inputInfo.map { it.key + ":" + it.value.info.toString() }}")
+        record("Encoder outputs: ${enc.outputInfo.map { it.key + ":" + it.value.info.toString() }}")
+        record("Decoder inputs: ${dec.inputInfo.map { it.key + ":" + it.value.info.toString() }}")
+        record("Decoder outputs: ${dec.outputInfo.map { it.key + ":" + it.value.info.toString() }}")
+        record("Bitmap source: ${bitmap.width}x${bitmap.height}")
         // ARM exported graph has a 16-way spatial reshape. A 64-pixel
         // input multiple is NOT enough: the encoder downsamples 16x,
         // yielding shapes like [1,8,28,256] (not divisible by 16).
@@ -81,24 +99,30 @@ class OnnxMathRecognizer(private val context: Context) {
             val p = pixels[i]
             1f - ((((p shr 16) and 255) * .299f + ((p shr 8) and 255) * .587f + (p and 255) * .114f) / 255f)
         }
+        record("Input: ${w}x${h}; foreground > 0.5 = ${floats.count { it > 0.5f }} / ${floats.size}; range=${floats.minOrNull()}..${floats.maxOrNull()}")
         scaled.recycle(); padded.recycle()
+        // Do not mark the white canvas padding as invalid. The ONNX encoder
+        // was exported with a pixel mask; the whole padded image is a valid
+        // image, including white background. A cropped-only mask can discard
+        // the formula context and cause a collapsed decoder distribution.
         val mask = ByteBuffer.allocateDirect(w * h).order(ByteOrder.nativeOrder())
-        repeat(h) { y -> repeat(w) { x ->
-            val valid = x >= offsetX && x < offsetX + scaledW && y >= offsetY && y < offsetY + scaledH
-            mask.put(if (valid) 1.toByte() else 0.toByte())
-        } }
+        repeat(w * h) { mask.put(1.toByte()) }
         mask.rewind()
         OnnxTensor.createTensor(env, FloatBuffer.wrap(floats), longArrayOf(1, 1, h.toLong(), w.toLong())).use { image ->
             OnnxTensor.createTensor(env, mask, longArrayOf(1, h.toLong(), w.toLong()), OnnxJavaType.BOOL).use { pixelMask ->
                 enc.run(mapOf("pixel_values" to image, "pixel_mask" to pixelMask)).use { encoded ->
                     val features = encoded.get("encoder_features").orElseThrow { IllegalStateException("Encoder 缺少 features") } as OnnxTensor
                     val featureShape = features.info.shape
+                    record("Encoder features: ${featureShape.contentToString()}; mask=${(encoded.get("encoder_mask").orElseThrow() as OnnxTensor).info.shape.contentToString()}")
                     require(featureShape.size == 4 && featureShape[1] % 16L == 0L && featureShape[2] % 16L == 0L) {
                         "ARM 空間尺寸不相容：${featureShape.contentToString()}；輸入 256x512"
                     }
                     val encMask = encoded.get("encoder_mask").orElseThrow { IllegalStateException("Encoder 缺少 mask") } as OnnxTensor
                     val ids = ArrayList<Long>(); ids.add(1L) // <sos>
                     val output = ArrayList<String>()
+                    val trace = ArrayList<String>()
+                    var lastToken = -1
+                    var repeats = 0
                     for (step in 0 until 160) {
                         OnnxTensor.createTensor(env, LongBuffer.wrap(ids.toLongArray()), longArrayOf(1, ids.size.toLong())).use { inputIds ->
                             val decodedResult = try {
@@ -112,14 +136,32 @@ class OnnxMathRecognizer(private val context: Context) {
                                 val logits = decoded[0].value as? Array<*> ?: error("Decoder 輸出格式不符")
                                 val sequence = logits[0] as? Array<*> ?: error("Decoder 輸出序列格式不符")
                                 val last = sequence.last() as? FloatArray ?: error("Decoder logits 不是 float32")
-                                val next = last.indices.maxByOrNull { last[it] } ?: error("空白 logits")
-                                if (next == 2) return output.joinToString(" ").trim().ifBlank { error("模型未辨識出公式") }
+                                if (step < 12) record("Step=$step ids=${ids.joinToString(",")} outputShape=${(decoded[0] as OnnxTensor).info.shape.contentToString()}")
+                                require(last.size == vocab.size) {
+                                    "詞彙表與模型不符：logits=${last.size}，vocab=${vocab.size}"
+                                }
+                                require(last.all { it.isFinite() }) { "Decoder logits 出現 NaN/Infinity，step=$step" }
+                                val ranked = last.indices.sortedByDescending { last[it] }.take(3)
+                                val next = ranked.firstOrNull() ?: error("空白 logits")
+                                if (step < 12) record("Top5: " + last.indices.sortedByDescending { last[it] }.take(5).joinToString(" | ") { "${it}:${vocab[it]}=${"%.3f".format(java.util.Locale.US, last[it])}" })
+                                if (step < 6) trace.add("$step:" + ranked.joinToString("/") { "${vocab[it]}=${"%.2f".format(java.util.Locale.US, last[it])}" })
+                                if (next == lastToken) repeats++ else repeats = 0
+                                lastToken = next
+                                // A stream such as EEEEE... is a decoder failure,
+                                // not a valid recognized equation. Report useful
+                                // diagnostics instead of inserting fabricated LaTeX.
+                                if (repeats >= 5) error("Decoder 重複輸出 ${vocab[next]}；前六步：${trace.joinToString(" | ")}")
+                                if (next == 2) {
+                                    val latex = output.joinToString(" ").trim().ifBlank { error("模型未辨識出公式；${trace.joinToString(" | ")}") }
+                                    record("EOS step=$step; result=$latex")
+                                    return latex
+                                }
                                 if (next != 0 && next != 1) output.add(vocab[next] ?: error("未知 token $next"))
                                 ids.add(next.toLong())
                             }
                         }
                     }
-                    return output.joinToString(" ").trim().ifBlank { error("辨識達長度上限，沒有有效輸出") }
+                    error("Decoder 達 160 token 上限且沒有 EOS；前六步：${trace.joinToString(" | ")}")
                 }
             }
         }
