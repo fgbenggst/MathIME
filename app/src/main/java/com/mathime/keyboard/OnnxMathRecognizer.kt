@@ -56,11 +56,13 @@ class OnnxMathRecognizer(private val context: Context) {
         val dec = checkNotNull(decoder)
         val vocab = checkNotNull(words)
         // CoMER consumes dark ink as 1.0, white background as 0.0.
-        // Pad dimensions to multiples of 16 to satisfy encoder downsampling.
+        // Pad dimensions to multiples of 64: the CoMER ARM decoder splits
+        // encoder spatial dimensions into groups of 16 after 4x downsampling.
+        // Padding only to 16 can yield enc_w=152 and crash Reshape_5.
         val targetHeight = 128
         val scale = minOf(targetHeight.toFloat() / bitmap.height, 768f / bitmap.width)
-        val w = max(16, ((bitmap.width * scale).roundToInt() + 15) / 16 * 16)
-        val h = max(16, ((bitmap.height * scale).roundToInt() + 15) / 16 * 16)
+        val w = max(16, ((bitmap.width * scale).roundToInt() + 63) / 64 * 64)
+        val h = max(16, ((bitmap.height * scale).roundToInt() + 63) / 64 * 64)
         val scaledW = max(1, (bitmap.width * scale).roundToInt())
         val scaledH = max(1, (bitmap.height * scale).roundToInt())
         val scaled = Bitmap.createScaledBitmap(bitmap, scaledW, scaledH, true)
@@ -81,6 +83,10 @@ class OnnxMathRecognizer(private val context: Context) {
             OnnxTensor.createTensor(env, mask, longArrayOf(1, h.toLong(), w.toLong()), OnnxJavaType.BOOL).use { pixelMask ->
                 enc.run(mapOf("pixel_values" to image, "pixel_mask" to pixelMask)).use { encoded ->
                     val features = encoded.get("encoder_features").orElseThrow { IllegalStateException("Encoder 缺少 features") } as OnnxTensor
+                    val featureShape = features.info.shape
+                    require(featureShape.size == 4 && featureShape[1] % 16L == 0L && featureShape[2] % 16L == 0L) {
+                        "CoMER encoder feature shape incompatible with ARM attention: ${featureShape.contentToString()}"
+                    }
                     val encMask = encoded.get("encoder_mask").orElseThrow { IllegalStateException("Encoder 缺少 mask") } as OnnxTensor
                     val ids = ArrayList<Long>(); ids.add(1L) // <sos>
                     val output = ArrayList<String>()

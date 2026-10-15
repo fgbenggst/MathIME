@@ -1,3 +1,14 @@
+# MathIME v0.9.1 — CoMER Reshape 修正測試版
+
+本版保留 v0.9 的 Android 輸入法與真實 CoMER encoder/decoder/vocab 模型。
+
+## 修正
+實機錯誤 `Reshape_5: input shape {1,16,1,152}, requested {1,16,1,16,-1}` 顯示 decoder ARM 注意力的空間維度不能被 16 整除。原版影像僅補齊到 16 的倍數；新版補齊到 64 的倍數，以配合 encoder 的空間降採樣及 ARM 的 16 組切分。另加入 encoder feature shape 檢查與錯誤提示。
+
+**這是針對實機錯誤的修正候選，尚未完成 Android 編譯與手機推論驗證，不能保證辨識準確率。**
+
+編譯：將 ZIP 解壓至 GitHub repo 根目錄，Actions → Build MathIME APK → Run workflow。
+
 # MathIME v0.9 CoMER ONNX (Android Kotlin)
 
 This source package **includes actual uploaded pretrained ONNX weights**: `encoder_int8.onnx`, `decoder_int8.onnx`, and `vocab.json` under `app/src/main/assets/`.
