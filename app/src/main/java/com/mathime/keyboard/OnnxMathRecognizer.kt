@@ -44,6 +44,8 @@ class OnnxMathRecognizer(private val context: Context) {
     fun setPrecisionMode(enabled: Boolean) { precisionMode = enabled }
     private var lastCandidates: List<Candidate> = emptyList()
     fun candidates(): List<Candidate> = lastCandidates.toList()
+    @Volatile private var uncertain = false
+    fun isUncertain(): Boolean = uncertain
 
     /** Runs all variants sequentially on the same worker, retaining independent diagnostics.
      * Scores from different images are not calibrated: keep original-image results first,
@@ -52,7 +54,8 @@ class OnnxMathRecognizer(private val context: Context) {
     fun recognizeVariants(variants: List<Pair<String, Bitmap>>, callback: (Result<String>) -> Unit) {
         worker.execute {
             diagnostics.setLength(0)
-            record("MathIME v1.0.9 diagnostics; mode=${if (precisionMode) "precise" else "fast"}")
+            uncertain = false
+            record("MathIME v1.0.11 diagnostics; mode=${if (precisionMode) "precise" else "fast"}")
             val totalStart = android.os.SystemClock.elapsedRealtime()
             val result = runCatching {
                 val combined = mutableListOf<Candidate>()
@@ -245,6 +248,15 @@ class OnnxMathRecognizer(private val context: Context) {
                                     val best = logits.indices.sortedByDescending { logits[it] }.take(width + 2)
                                     if (step < 5 && beam === beams.first()) {
                                         record("Beam step=$step ids=${beam.ids.joinToString(",")} top=" + best.take(5).joinToString(" | ") { "${vocab[it]}:${"%.2f".format(java.util.Locale.US, logits[it])}" })
+                                        val watch = listOf("x", "2", "+", "I", "i", "E", "\\pi", "<eos>")
+                                        record("Token probes step=$step: " + watch.joinToString(" | ") { token ->
+                                            val id = vocab.entries.firstOrNull { it.value == token }?.key
+                                            if (id == null) "$token=not-in-vocab" else {
+                                                val rank = logits.count { it > logits[id] } + 1
+                                                val prob = kotlin.math.exp(logits[id].toDouble() - logNorm)
+                                                "$token rank=$rank p=${"%.4f".format(java.util.Locale.US, prob)}"
+                                            }
+                                        })
                                     }
                                     for (id in best) {
                                         if (id == 0 || id == 1) continue // disallow PAD/SOS
@@ -289,6 +301,11 @@ class OnnxMathRecognizer(private val context: Context) {
                         .sortedByDescending { it.second }
                     lastCandidates = ordered.distinctBy { it.first }
                         .take(if (precisionMode) 6 else 3).map { Candidate(it.first, it.second) }
+                    val suspicious = setOf("I", "i", "E", "\\pi", "\\sum")
+                    val topTokens = lastCandidates.firstOrNull()?.latex?.split(Regex("\\s+")) ?: emptyList()
+                    val suspiciousCount = topTokens.count { it in suspicious }
+                    uncertain = topTokens.size >= 3 && suspiciousCount >= 2
+                    record("Confidence heuristic: uncertain=$uncertain suspicious=$suspiciousCount/${topTokens.size}; heuristic is not a calibrated probability")
                     lastCandidates.forEachIndexed { index, candidate -> record("Candidate ${index + 1}: score=${candidate.score} latex=${candidate.latex}") }
                     return lastCandidates.firstOrNull()?.latex ?: error("模型沒有產生有效公式；請分享診斷檔")
                 }
