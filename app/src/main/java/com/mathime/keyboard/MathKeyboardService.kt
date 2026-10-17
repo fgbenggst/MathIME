@@ -303,7 +303,7 @@ class MathKeyboardService : InputMethodService() {
             })
             val intent = android.content.Intent(android.content.Intent.ACTION_SEND_MULTIPLE).apply {
                 type = "*/*"
-                putExtra(android.content.Intent.EXTRA_SUBJECT, "MathIME v1.0.18 辨識診斷")
+                putExtra(android.content.Intent.EXTRA_SUBJECT, "MathIME v1.0.20 辨識診斷")
                 putExtra(android.content.Intent.EXTRA_TEXT,
                     "MathIME 診斷文字及模型輸入圖片（512×256）\n\n" + log.readText().takeLast(45000))
                 putParcelableArrayListExtra(android.content.Intent.EXTRA_STREAM, uris)
@@ -431,11 +431,31 @@ class MathKeyboardService : InputMethodService() {
                 } else singleGlyph?.let {
                     OnnxMathRecognizer.Candidate(it.latex, 0.0, "單字元幾何辨識（${(it.confidence*100).toInt()}% 規則分數）")
                 }
-                candidateResults = if (geometryCandidate != null) {
-                    (listOf(geometryCandidate) + modelCandidates.filterNot {
-                        it.latex.replace(" ", "") == geometryCandidate.latex.replace(" ", "")
-                    }).take(9)
-                } else modelCandidates
+                // Fraction-bar evidence is available from the stroke grouping
+                // diagnostic. Only offer a *reviewable* alternative when CoMER
+                // itself already decoded a structurally complete fraction.
+                // Do not blindly strip E from ordinary equations.
+                val fractionInk = groupedAnalysis?.diagnostic
+                    ?.contains("abstain=fraction bar / vertical layout") == true
+                val fractionAlternatives = if (fractionInk) modelCandidates.mapNotNull { c ->
+                    val raw = c.latex.trim()
+                    val suffix = Regex("\\s+E(?:\\s+E)*$")
+                    val withoutPrefix = raw.replaceFirst(Regex("^E\\s+"), "")
+                    if (withoutPrefix == raw || !withoutPrefix.startsWith("\\frac") ||
+                        !suffix.containsMatchIn(raw)) null
+                    else {
+                        val cleaned = raw.replaceFirst(Regex("^E\\s+"), "")
+                            .replace(suffix, "").trim()
+                        val balanced = cleaned.count { it == '{' } == cleaned.count { it == '}' }
+                        if (!balanced || !cleaned.startsWith("\\frac")) null
+                        else OnnxMathRecognizer.Candidate(
+                            cleaned, c.score, "分式結構候選（移除前後可疑 E，請核對）")
+                    }
+                } else emptyList()
+                val proposed = if (geometryCandidate != null) {
+                    listOf(geometryCandidate) + modelCandidates
+                } else fractionAlternatives + modelCandidates
+                candidateResults = proposed.distinctBy { it.latex.replace(" ", "") }.take(9)
                 candidateIndex = 0
                 refreshCandidateButtons()
                 val selected = candidateResults.firstOrNull()?.latex ?: latex

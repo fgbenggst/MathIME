@@ -121,12 +121,15 @@ class GroupedGlyphRecognizer(private val single: SingleGlyphRecognizer) {
             val upward=corner.y-last.y
             // The top must bow to the right, the lower turn must be distinct,
             // and the final tail must move right (slight upward curvature allowed).
-            if (rightOnHead < .64f || rightOnHead-corner.x < .20f ||
-                rightward < .36f || upward < -.17f || upward > .42f) continue
+            // Handwritten 2 may have a narrow upper arc (observed ~0.50).
+            // The rightward finishing tail and chronological lower-left turn
+            // are more discriminative than an arbitrary upper-arc width.
+            if (rightOnHead < .46f || rightOnHead-corner.x < .16f ||
+                rightward < .36f || upward < -.17f || upward > .48f) continue
             // Avoid classifying a zig-zag '3' as '2': the lower corner must
             // occur after the upper-right excursion.
             val topRightIndex=(0..cornerIndex).maxByOrNull { q[it].x } ?: continue
-            if (topRightIndex >= cornerIndex || cornerIndex < q.size/3) continue
+            if (topRightIndex >= cornerIndex || cornerIndex < q.size/4) continue
             return SingleGlyphRecognizer.Prediction(
                 "2", .77f, "upper-right arc, lower-left turn and rising rightward tail")
         }
