@@ -65,18 +65,84 @@ class GroupedGlyphRecognizer(private val single: SingleGlyphRecognizer) {
             .sortedBy{group->group.flatten().minOf{it.x}}
         log.append("; groups=").append(groups.map{it.size})
         if(groups.size !in 2..4)return Result(null,log.append("; abstain=not 2..4 spatial groups").toString())
-        val glyphs=mutableListOf<String>()
+        fun recognize(group:List<List<PointF>>):SingleGlyphRecognizer.Prediction? {
+            val base=single.analyze(group).prediction
+            if(base!=null)return base
+            return classifyThree(group) ?: classifyTwo(group) ?: classifyFive(group) ?: classifyFiveMulti(group)
+        }
+        fun resolve(parts:List<List<List<PointF>>>):String? {
+            val result=parts.map { recognize(it)?.latex ?: return null }
+            // Geometry-only promotion is restricted to short horizontal expressions.
+            // A fraction or an unrecognized symbol is handled by the full CoMER model.
+            return result.joinToString(" ")
+        }
         for((i,group) in groups.withIndex()){
             val shape=single.analyze(group)
-            val candidate=shape.prediction ?: classifyThree(group) ?: classifyTwo(group) ?: classifyFive(group)
+            val candidate=recognize(group)
             log.append("; g").append(i).append("=")
                 .append(candidate?.latex ?: "?")
                 .append(" [").append(shape.diagnostic).append("]")
-            if(candidate==null)return Result(null,log.append("; abstain=unrecognized group").toString())
-            glyphs.add(candidate.latex)
         }
-        val latex=glyphs.joinToString(" ")
-        return Result(latex,log.append("; accepted=").append(latex).toString())
+        resolve(groups)?.let{return Result(it,log.append("; accepted=").append(it).toString())}
+        // A '5' is frequently written as two non-intersecting strokes: the
+        // short upper bar and a long hooked body. Spatial overlap alone
+        // cannot group these; try only adjacent partitions and require every
+        // resulting glyph to pass a conservative geometry check.
+        val sorted=strokes.sortedBy { bounds(it).cx }
+        val n=sorted.size
+        var attempts=0
+        var best:String?=null
+        var bestGroups=0
+        fun partitions(start:Int,parts:MutableList<List<List<PointF>>>) {
+            if(attempts>=128)return
+            if(start==n){
+                if(parts.size in 2..4){
+                    attempts++
+                    val candidate=resolve(parts)
+                    if(candidate!=null && (best==null || parts.size>bestGroups)){
+                        best=candidate;bestGroups=parts.size
+                    }
+                }
+                return
+            }
+            if(parts.size>=4)return
+            for(end in start+1..min(n,start+3)){
+                val part=sorted.subList(start,end)
+                val b=bounds(part.flatten())
+                // Reject a partition spanning most of the equation width.
+                if(b.w>overall.w*.72f && end-start>1)continue
+                parts.add(part)
+                partitions(end,parts)
+                parts.removeAt(parts.lastIndex)
+            }
+        }
+        partitions(0,mutableListOf())
+        log.append("; repartitionAttempts=").append(attempts)
+        if(best!=null)return Result(best,log.append("; accepted=").append(best).append(" via repartition").toString())
+        return Result(null,log.append("; abstain=unrecognized group").toString())
+    }
+
+    /** A separated top bar and hooked body of a handwritten 5. */
+    private fun classifyFiveMulti(group:List<List<PointF>>):SingleGlyphRecognizer.Prediction? {
+        if(group.size!=2)return null
+        val bb=group.map(::bounds)
+        val top=bb.indices.minByOrNull{bb[it].cy}?:return null
+        val bottom=1-top
+        val bar=group[top]
+        val body=group[bottom]
+        val barBounds=bb[top];val bodyBounds=bb[bottom]
+        val all=bounds(group.flatten())
+        val start=bar.first();val finish=bar.last()
+        val dx=abs(finish.x-start.x);val dy=abs(finish.y-start.y)
+        if(dx<all.w*.30f || dy>dx*.38f || barBounds.cy>all.t+all.h*.33f)return null
+        if(bodyBounds.h<all.h*.55f || bodyBounds.w<all.w*.38f)return null
+        val normalized=body.map{PointF((it.x-all.l)/all.w,(it.y-all.t)/all.h)}
+        val lower=normalized.filter{it.y>.58f}
+        val middle=normalized.filter{it.y in .30f.. .70f}
+        if(lower.size<3 || middle.size<3)return null
+        if(lower.maxOf{it.x}<.68f || middle.minOf{it.x}>.50f)return null
+        if(bodyBounds.t>all.t+all.h*.40f)return null
+        return SingleGlyphRecognizer.Prediction("5",.71f,"separate upper bar and lower hooked body")
     }
 
     /**
